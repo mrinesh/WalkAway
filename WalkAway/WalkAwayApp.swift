@@ -25,7 +25,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var popover: NSPopover?
     var timer: Timer?
-    var overlayWindowController: OverlayWindowController?
+    var overlayWindowControllers: [OverlayWindowController] = []
     private var uiUpdateTimer: Timer?
     
     // Settings (persisted with UserDefaults)
@@ -146,13 +146,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         remainingSeconds = breakDurationSeconds
         currentMessage = motivationalMessages.randomElement() ?? "Take a break!"
         
-        // Create overlay window
-        overlayWindowController = OverlayWindowController()
-        overlayWindowController?.currentMessage = currentMessage
-        overlayWindowController?.skipCallback = { [weak self] in
-            self?.finishBreak(skipped: true)
+        // Clear any previous overlay windows
+        overlayWindowControllers.forEach { $0.close() }
+        overlayWindowControllers = []
+        
+        // Create overlay window for each screen
+        for screen in NSScreen.screens {
+            let overlayController = OverlayWindowController(screen: screen)
+            overlayController.currentMessage = currentMessage
+            overlayController.skipCallback = { [weak self] in
+                self?.finishBreak(skipped: true)
+            }
+            overlayController.showWindow(nil)
+            overlayWindowControllers.append(overlayController)
         }
-        overlayWindowController?.showWindow(nil)
         
         // Start countdown timer
         startCountdownTimer()
@@ -167,7 +174,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             
             self.remainingSeconds -= 1
             let formattedTime = self.formatTime(seconds: self.remainingSeconds)
-            self.overlayWindowController?.updateTimeDisplay(formattedTime)
+            
+            // Update time display on all overlay windows
+            for overlayController in self.overlayWindowControllers {
+                overlayController.updateTimeDisplay(formattedTime)
+            }
             
             if self.remainingSeconds <= 0 {
                 self.finishBreak(skipped: false)
@@ -182,11 +193,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         isBreakActive = false
         timer?.invalidate()
         
-        overlayWindowController?.close()
-        overlayWindowController = nil
+        // Close all overlay windows
+        overlayWindowControllers.forEach { $0.close() }
+        overlayWindowControllers = []
         
-        // Play a sound to indicate the break is over
-        NSSound(named: "Glass")?.play()
+        // Play a sound to indicate the break is over - changed to Bottle
+        NSSound(named: "Bottle")?.play()
         
         // Restart the main timer
         startBreakTimer()

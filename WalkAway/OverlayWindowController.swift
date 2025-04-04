@@ -42,13 +42,9 @@ class OverlayWindowController: NSWindowController {
     // private var messageTimer: Timer?
     private var skipButton: NSButton?
     
-    convenience init() {
-        // Get the main screen
-        guard let screen = NSScreen.main else {
-            fatalError("Could not find main screen")
-        }
-        
-        // Create a window filling the entire screen
+    // Updated initializer to accept a specific screen
+    convenience init(screen: NSScreen) {
+        // Use the provided screen's frame
         let window = NSWindow(
             contentRect: screen.frame,
             styleMask: [.borderless],
@@ -67,11 +63,17 @@ class OverlayWindowController: NSWindowController {
         // Initialize with the window
         self.init(window: window)
         
-        // Remove setting message here - AppDelegate will set it
-        // self.currentMessage = self.getRandomMotivationalMessage()
-        
         // Set up content
         setupContentView()
+    }
+    
+    // Default convenience init (can be removed if not needed elsewhere, 
+    // but kept for now in case of future use or direct initialization needs)
+    convenience init() {
+        guard let mainScreen = NSScreen.main else {
+            fatalError("Could not find main screen for default init")
+        }
+        self.init(screen: mainScreen)
     }
     
     // Remove internal random message function
@@ -240,6 +242,9 @@ class OverlayWindowController: NSWindowController {
         button.title = "Skip Break"
         button.target = self
         button.action = #selector(skipButtonClicked)
+        
+        // Explicitly disable standard bordering behavior to remove the outline
+        button.isBordered = false
         
         // Style the button using its layer
         button.wantsLayer = true
