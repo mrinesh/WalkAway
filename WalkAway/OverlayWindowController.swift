@@ -37,33 +37,38 @@ class OverlayWindowController: NSWindowController {
     private var timeLabel: NSTextField?
     private var messageLabel: NSTextField?
     private var visualEffectView: NSVisualEffectView?
-    private var animationTimer: Timer?
+    // Keep track of background animation layers
+    private var backgroundLayers: [CALayer] = []
+    private var animationTimers: [Timer] = [] // Store all timers for cleanup
     // Remove message timer - AppDelegate handles message selection
     // private var messageTimer: Timer?
     private var skipButton: NSButton?
     
     // Updated initializer to accept a specific screen
     convenience init(screen: NSScreen) {
-        // Use the provided screen's frame
+        // 1. Create a basic window without explicit frame or screen initially
         let window = NSWindow(
-            contentRect: screen.frame,
+            contentRect: .zero, // Start with zero rect
             styleMask: [.borderless],
             backing: .buffered,
-            defer: false,
-            screen: screen
+            defer: false
+            // screen: screen // Don't assign screen here initially
         )
         
-        // Configure window properties
-        window.level = .screenSaver // Make sure it appears above other windows
-        window.backgroundColor = .clear // Using a custom view for background
+        // Configure window properties that don't depend on frame
+        window.level = .screenSaver
+        window.backgroundColor = .clear
         window.isOpaque = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.ignoresMouseEvents = false // Allow interaction with the skip button
+        window.ignoresMouseEvents = false
         
-        // Initialize with the window
+        // 2. Initialize the NSWindowController
         self.init(window: window)
         
-        // Set up content
+        // 3. NOW set the frame explicitly using the screen's global coordinates
+        window.setFrame(screen.frame, display: true)
+        
+        // 4. Set up content view (now that the frame should be correctly set)
         setupContentView()
     }
     
@@ -83,83 +88,64 @@ class OverlayWindowController: NSWindowController {
         guard let window = self.window else { return }
         
         // Create a visual effect view for the background blur
-        let visualEffectView = NSVisualEffectView(frame: window.contentView?.bounds ?? .zero)
+        visualEffectView = NSVisualEffectView(frame: window.contentView?.bounds ?? .zero)
+        guard let visualEffectView = visualEffectView else { return }
         visualEffectView.material = .ultraDark 
         visualEffectView.state = .active
         visualEffectView.blendingMode = .behindWindow
         visualEffectView.wantsLayer = true
-        self.visualEffectView = visualEffectView
         
-        // Container for content
-        let containerView = NSView(frame: visualEffectView.bounds)
-        containerView.wantsLayer = true
-        containerView.layer?.backgroundColor = .clear
+        // --- Redesigned Background Elements --- 
         
-        // Create main gradient background layer with more varied colors
-        let gradientLayer = CAGradientLayer()
-        gradientLayer.frame = visualEffectView.bounds
-        
-        // Enhanced color palette with blues, olive green, grey and black
-        let deepNavy = NSColor(calibratedRed: 0.05, green: 0.08, blue: 0.18, alpha: 1.0)
-        let mediumBlue = NSColor(calibratedRed: 0.1, green: 0.2, blue: 0.35, alpha: 1.0)
-        let lightBlue = NSColor(calibratedRed: 0.2, green: 0.3, blue: 0.45, alpha: 1.0)
-        let oliveGreen = NSColor(calibratedRed: 0.3, green: 0.4, blue: 0.2, alpha: 0.7)
-        let darkGrey = NSColor(calibratedRed: 0.15, green: 0.15, blue: 0.17, alpha: 0.9)
-        
-        // Set up gradient with our extended color palette
-        gradientLayer.colors = [
-            deepNavy.cgColor,
-            mediumBlue.cgColor,
-            lightBlue.cgColor,
-            oliveGreen.cgColor,
-            darkGrey.cgColor
+        // 1. Base Gradient Layer
+        let baseGradientLayer = CAGradientLayer()
+        baseGradientLayer.frame = visualEffectView.bounds
+        baseGradientLayer.name = "baseGradient"
+        // Define new color palette (e.g., deep blues, purples, teals)
+        let color1 = NSColor(calibratedRed: 0.05, green: 0.05, blue: 0.15, alpha: 1.0)
+        let color2 = NSColor(calibratedRed: 0.1, green: 0.08, blue: 0.25, alpha: 1.0) // Purple hint
+        let color3 = NSColor(calibratedRed: 0.08, green: 0.15, blue: 0.3, alpha: 1.0) // Teal hint
+        let color4 = NSColor(calibratedRed: 0.06, green: 0.1, blue: 0.2, alpha: 1.0)
+        baseGradientLayer.colors = [color1.cgColor, color2.cgColor, color3.cgColor, color4.cgColor]
+        baseGradientLayer.locations = [0.0, 0.3, 0.7, 1.0]
+        baseGradientLayer.startPoint = CGPoint(x: 0, y: 0)
+        baseGradientLayer.endPoint = CGPoint(x: 1, y: 1)
+        visualEffectView.layer?.addSublayer(baseGradientLayer)
+        backgroundLayers.append(baseGradientLayer)
+
+        // 2. Drifting Nebulae Layers (Soft, Large Glows)
+        let nebulaColors = [
+            NSColor(calibratedRed: 0.2, green: 0.3, blue: 0.6, alpha: 0.1), // Soft Blue
+            NSColor(calibratedRed: 0.4, green: 0.2, blue: 0.5, alpha: 0.08), // Soft Magenta
+            NSColor(calibratedRed: 0.1, green: 0.4, blue: 0.4, alpha: 0.09)  // Soft Teal
         ]
-        gradientLayer.locations = [0.0, 0.25, 0.5, 0.75, 1.0]
-        gradientLayer.startPoint = CGPoint(x: 0, y: 0)
-        gradientLayer.endPoint = CGPoint(x: 1, y: 1)
-        
-        // Add accent gradient for more color depth
-        let accentGradientLayer = CAGradientLayer()
-        accentGradientLayer.frame = visualEffectView.bounds
-        accentGradientLayer.colors = [
-            NSColor(calibratedRed: 0.1, green: 0.3, blue: 0.5, alpha: 0.2).cgColor,
-            NSColor(calibratedRed: 0.2, green: 0.4, blue: 0.6, alpha: 0.0).cgColor,
-            NSColor(calibratedRed: 0.3, green: 0.5, blue: 0.2, alpha: 0.15).cgColor
-        ]
-        accentGradientLayer.locations = [0.0, 0.5, 1.0]
-        accentGradientLayer.startPoint = CGPoint(x: 1, y: 0)
-        accentGradientLayer.endPoint = CGPoint(x: 0, y: 1)
-        
-        // Add base gradient and accent gradients
-        visualEffectView.layer?.addSublayer(gradientLayer)
-        visualEffectView.layer?.addSublayer(accentGradientLayer)
-        
-        // Create multiple moving glow elements with different colors
-        let glowLayer1 = createGlowLayer(color: NSColor(calibratedRed: 0.1, green: 0.4, blue: 0.6, alpha: 0.15),
-                                        size: 600, cornerRadius: 300, name: "blueGlow")
-        let glowLayer2 = createGlowLayer(color: NSColor(calibratedRed: 0.3, green: 0.4, blue: 0.2, alpha: 0.12),
-                                        size: 500, cornerRadius: 250, name: "greenGlow")
-        let glowLayer3 = createGlowLayer(color: NSColor(calibratedRed: 0.2, green: 0.2, blue: 0.3, alpha: 0.1),
-                                        size: 700, cornerRadius: 350, name: "greyGlow")
-        
-        visualEffectView.layer?.addSublayer(glowLayer1)
-        visualEffectView.layer?.addSublayer(glowLayer2)
-        visualEffectView.layer?.addSublayer(glowLayer3)
-        
-        // Add particle layer for small glowing particles
+        for i in 0..<nebulaColors.count {
+            let nebulaLayer = createNebulaLayer(color: nebulaColors[i], bounds: visualEffectView.bounds)
+            nebulaLayer.name = "nebula_\(i)"
+            visualEffectView.layer?.addSublayer(nebulaLayer)
+            backgroundLayers.append(nebulaLayer)
+        }
+
+        // 3. Particle Layer
         let particleLayer = CALayer()
         particleLayer.frame = visualEffectView.bounds
         particleLayer.name = "particleLayer"
         visualEffectView.layer?.addSublayer(particleLayer)
+        backgroundLayers.append(particleLayer)
         
-        // Add light beams layer
-        let beamsLayer = CALayer()
-        beamsLayer.frame = visualEffectView.bounds
-        beamsLayer.name = "beamsLayer"
-        visualEffectView.layer?.addSublayer(beamsLayer)
+        // 4. Comet Trail Layer
+        let cometLayer = CALayer()
+        cometLayer.frame = visualEffectView.bounds
+        cometLayer.name = "cometLayer"
+        visualEffectView.layer?.addSublayer(cometLayer)
+        backgroundLayers.append(cometLayer)
         
-        // Add decorative elements - light paths crossing the screen
-        addLightPaths(to: containerView, bounds: visualEffectView.bounds)
+        // --- End Redesigned Background --- 
+
+        // Container for Foreground Content (Timer, Message, Button)
+        let containerView = NSView(frame: visualEffectView.bounds)
+        containerView.wantsLayer = true
+        containerView.layer?.backgroundColor = .clear // Transparent container
         
         // Motivational message with shadow and styling
         let messageLabel = createStyledLabel(text: currentMessage, fontSize: 36, weight: .medium)
@@ -198,8 +184,8 @@ class OverlayWindowController: NSWindowController {
         stackView.spacing = 40
         
         // Position the stack in the container
+        containerView.addSubview(glowView) // Add glow first so it's behind stack
         containerView.addSubview(stackView)
-        containerView.addSubview(glowView)
         
         // Use Auto Layout for positioning
         stackView.translatesAutoresizingMaskIntoConstraints = false
@@ -218,22 +204,16 @@ class OverlayWindowController: NSWindowController {
             glowView.heightAnchor.constraint(equalToConstant: 150)
         ])
         
-        // Add the container to the visual effect
+        // Add the container on top of the background elements
         visualEffectView.addSubview(containerView)
         containerView.frame = visualEffectView.bounds
         containerView.autoresizingMask = [.width, .height]
         
-        // Set the visual effect view as the content
+        // Set the visual effect view as the window's content
         window.contentView = visualEffectView
         
-        // Start the animations on relevant layers
-        startBackgroundAnimations(
-            mainGradientLayer: gradientLayer,
-            accentGradientLayer: accentGradientLayer,
-            particleLayer: particleLayer,
-            beamsLayer: beamsLayer,
-            glowLayers: [glowLayer1, glowLayer2, glowLayer3]
-        )
+        // Start background animations
+        startBackgroundAnimations()
     }
     
     private func createSkipButton() -> NSButton {
@@ -288,434 +268,229 @@ class OverlayWindowController: NSWindowController {
         return label
     }
     
-    private func createGlowLayer(color: NSColor, size: CGFloat, cornerRadius: CGFloat, name: String) -> CALayer {
-        let glowLayer = CALayer()
-        let offset = size / 2
-        glowLayer.frame = CGRect(x: -offset, y: -offset, width: size, height: size)
-        glowLayer.backgroundColor = color.cgColor
-        glowLayer.cornerRadius = cornerRadius
-        glowLayer.shadowColor = color.cgColor
-        glowLayer.shadowOffset = .zero
-        glowLayer.shadowRadius = cornerRadius / 2
-        glowLayer.shadowOpacity = 1.0
-        glowLayer.name = name
-        return glowLayer
+    // Helper to create soft nebula layers
+    private func createNebulaLayer(color: NSColor, bounds: CGRect) -> CALayer {
+        let nebulaLayer = CALayer()
+        let size = max(bounds.width, bounds.height) * CGFloat.random(in: 0.6...1.2) // Large size
+        nebulaLayer.bounds = CGRect(x: 0, y: 0, width: size, height: size)
+        // Position randomly initially (animation will move it)
+        nebulaLayer.position = CGPoint(x: CGFloat.random(in: 0...bounds.width),
+                                   y: CGFloat.random(in: 0...bounds.height))
+                                   
+        nebulaLayer.backgroundColor = color.cgColor
+        nebulaLayer.cornerRadius = size / 2
+        nebulaLayer.opacity = 0 // Start invisible, fade in
+        
+        // Use shadow as a heavy blur/glow effect
+        nebulaLayer.shadowColor = color.withAlphaComponent(color.alphaComponent * 1.5).cgColor
+        nebulaLayer.shadowRadius = size / 3 // Large radius for soft edges
+        nebulaLayer.shadowOpacity = 1.0
+        nebulaLayer.shadowOffset = .zero
+        
+        return nebulaLayer
     }
     
-    private func addLightPaths(to view: NSView, bounds: CGRect) {
-        let width = bounds.width
-        let height = bounds.height
+    // Start all background animations
+    private func startBackgroundAnimations() {
+        cleanupTimers() // Ensure previous timers are stopped
         
-        // Add multiple decorative paths with different colors and opacities
-        addLightPath(to: view, color: NSColor.white.withAlphaComponent(0.05), width: 1.0,
-                   startPoint: CGPoint(x: 0, y: height * 0.3),
-                   endPoint: CGPoint(x: width, y: height * 0.7),
-                   controlPoint1: CGPoint(x: width * 0.4, y: height * 0.1),
-                   controlPoint2: CGPoint(x: width * 0.6, y: height * 0.8))
+        guard let layer = visualEffectView?.layer else { return }
+
+        // Find layers by name (safer than assuming order)
+        let baseGradientLayer = layer.sublayers?.first { $0.name == "baseGradient" } as? CAGradientLayer
+        let nebulaLayers = layer.sublayers?.filter { $0.name?.starts(with: "nebula_") ?? false } ?? []
+        let particleLayer = layer.sublayers?.first { $0.name == "particleLayer" }
+        let cometLayer = layer.sublayers?.first { $0.name == "cometLayer" }
         
-        addLightPath(to: view, color: NSColor(calibratedRed: 0.2, green: 0.5, blue: 0.8, alpha: 0.07), width: 1.5,
-                   startPoint: CGPoint(x: width, y: height * 0.2),
-                   endPoint: CGPoint(x: 0, y: height * 0.6),
-                   controlPoint1: CGPoint(x: width * 0.6, y: height * 0.4),
-                   controlPoint2: CGPoint(x: width * 0.3, y: height * 0.5))
+        // 1. Animate Base Gradient
+        if let gradientLayer = baseGradientLayer {
+            animateBaseGradient(gradientLayer)
+        }
         
-        addLightPath(to: view, color: NSColor(calibratedRed: 0.3, green: 0.5, blue: 0.2, alpha: 0.06), width: 1.2,
-                   startPoint: CGPoint(x: width * 0.3, y: 0),
-                   endPoint: CGPoint(x: width * 0.7, y: height),
-                   controlPoint1: CGPoint(x: width * 0.2, y: height * 0.4),
-                   controlPoint2: CGPoint(x: width * 0.8, y: height * 0.6))
+        // 2. Animate Nebulae
+        for (index, nebulaLayer) in nebulaLayers.enumerated() {
+            animateNebulaLayer(nebulaLayer, index: index, bounds: layer.bounds)
+        }
         
-        addLightPath(to: view, color: NSColor(calibratedRed: 0.1, green: 0.1, blue: 0.2, alpha: 0.04), width: 2.0,
-                   startPoint: CGPoint(x: width * 0.8, y: height * 0.1),
-                   endPoint: CGPoint(x: width * 0.1, y: height * 0.8),
-                   controlPoint1: CGPoint(x: width * 0.7, y: height * 0.5),
-                   controlPoint2: CGPoint(x: width * 0.2, y: height * 0.3))
+        // 3. Animate Particles
+        if let pLayer = particleLayer {
+            let particleTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self, weak pLayer] _ in
+                guard let strongSelf = self, let targetLayer = pLayer else { return }
+                strongSelf.addParticle(to: targetLayer)
+            }
+            RunLoop.main.add(particleTimer, forMode: .common)
+            animationTimers.append(particleTimer)
+        }
+        
+        // 4. Animate Comet Trails
+        if let cLayer = cometLayer {
+            let cometTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self, weak cLayer] _ in
+                 guard let strongSelf = self, let targetLayer = cLayer else { return }
+                 strongSelf.addCometTrail(to: targetLayer)
+            }
+            RunLoop.main.add(cometTimer, forMode: .common)
+             animationTimers.append(cometTimer)
+        }
     }
     
-    private func addLightPath(to view: NSView, color: NSColor, width: CGFloat, startPoint: CGPoint, endPoint: CGPoint, controlPoint1: CGPoint, controlPoint2: CGPoint) {
-        let shapeLayer = CAShapeLayer()
-        let path = NSBezierPath()
+    // Animation for the base gradient
+    private func animateBaseGradient(_ layer: CAGradientLayer) {
+        let color1 = NSColor(calibratedRed: 0.05, green: 0.05, blue: 0.15, alpha: 1.0).cgColor
+        let color2 = NSColor(calibratedRed: 0.1, green: 0.08, blue: 0.25, alpha: 1.0).cgColor
+        let color3 = NSColor(calibratedRed: 0.08, green: 0.15, blue: 0.3, alpha: 1.0).cgColor
+        let color4 = NSColor(calibratedRed: 0.06, green: 0.1, blue: 0.2, alpha: 1.0).cgColor
         
-        path.move(to: NSPoint(x: startPoint.x, y: startPoint.y))
-        path.curve(to: NSPoint(x: endPoint.x, y: endPoint.y),
-                  controlPoint1: NSPoint(x: controlPoint1.x, y: controlPoint1.y),
-                  controlPoint2: NSPoint(x: controlPoint2.x, y: controlPoint2.y))
-        
-        shapeLayer.path = path.cgPath
-        shapeLayer.lineWidth = width
-        shapeLayer.strokeColor = color.cgColor
-        shapeLayer.fillColor = nil
-        view.layer?.addSublayer(shapeLayer)
+        let color5 = NSColor(calibratedRed: 0.12, green: 0.06, blue: 0.22, alpha: 1.0).cgColor // More purple
+        let color6 = NSColor(calibratedRed: 0.07, green: 0.18, blue: 0.28, alpha: 1.0).cgColor // More teal
+        let color7 = NSColor(calibratedRed: 0.04, green: 0.08, blue: 0.18, alpha: 1.0).cgColor // Darker
+        let color8 = NSColor(calibratedRed: 0.1, green: 0.1, blue: 0.25, alpha: 1.0).cgColor
+
+        let colorAnimation = CABasicAnimation(keyPath: "colors")
+        colorAnimation.fromValue = [color1, color2, color3, color4]
+        colorAnimation.toValue = [color5, color6, color8, color7]
+        colorAnimation.duration = 90.0 // Very slow
+        colorAnimation.autoreverses = true
+        colorAnimation.repeatCount = .infinity
+        colorAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(colorAnimation, forKey: "baseColorChange")
+
+        let locationAnimation = CABasicAnimation(keyPath: "locations")
+        locationAnimation.fromValue = [0.0, 0.3, 0.7, 1.0]
+        locationAnimation.toValue = [0.0, 0.4, 0.6, 1.0] // Shift focus
+        locationAnimation.duration = 75.0 // Very slow
+        locationAnimation.autoreverses = true
+        locationAnimation.repeatCount = .infinity
+        locationAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(locationAnimation, forKey: "baseLocationChange")
     }
     
-    private func startBackgroundAnimations(mainGradientLayer: CAGradientLayer, 
-                                         accentGradientLayer: CAGradientLayer,
-                                         particleLayer: CALayer,
-                                         beamsLayer: CALayer,
-                                         glowLayers: [CALayer]) {
-        // Animate main gradient colors with more color variation
-        let gradientColorAnimation = CABasicAnimation(keyPath: "colors")
-        
-        // Enhanced color palette with more vibrant colors
-        let deepNavy = NSColor(calibratedRed: 0.05, green: 0.08, blue: 0.18, alpha: 1.0)
-        let mediumBlue = NSColor(calibratedRed: 0.1, green: 0.2, blue: 0.35, alpha: 1.0)
-        let lightBlue = NSColor(calibratedRed: 0.2, green: 0.3, blue: 0.45, alpha: 1.0)
-        let oliveGreen = NSColor(calibratedRed: 0.3, green: 0.4, blue: 0.2, alpha: 0.7)
-        let darkGrey = NSColor(calibratedRed: 0.15, green: 0.15, blue: 0.17, alpha: 0.9)
-        
-        // Different color variations for animation
-        let deepNavy2 = NSColor(calibratedRed: 0.08, green: 0.12, blue: 0.25, alpha: 1.0)
-        let mediumBlue2 = NSColor(calibratedRed: 0.15, green: 0.25, blue: 0.4, alpha: 1.0)
-        let tealBlue = NSColor(calibratedRed: 0.1, green: 0.35, blue: 0.4, alpha: 0.8)
-        let lightGreen = NSColor(calibratedRed: 0.2, green: 0.45, blue: 0.25, alpha: 0.65)
-        let blueGrey = NSColor(calibratedRed: 0.2, green: 0.2, blue: 0.25, alpha: 0.9)
-        
-        gradientColorAnimation.fromValue = [
-            deepNavy.cgColor,
-            mediumBlue.cgColor,
-            lightBlue.cgColor,
-            oliveGreen.cgColor,
-            darkGrey.cgColor
-        ]
-        
-        gradientColorAnimation.toValue = [
-            deepNavy2.cgColor,
-            mediumBlue2.cgColor,
-            tealBlue.cgColor,
-            lightGreen.cgColor,
-            blueGrey.cgColor
-        ]
-        
-        // Somewhat faster animation for more noticeable effect
-        gradientColorAnimation.duration = 25.0
-        gradientColorAnimation.autoreverses = true
-        gradientColorAnimation.repeatCount = Float.infinity
-        gradientColorAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        mainGradientLayer.add(gradientColorAnimation, forKey: "colorChange")
-        
-        // Animate gradient locations more dramatically
-        let gradientLocationAnimation = CABasicAnimation(keyPath: "locations")
-        gradientLocationAnimation.fromValue = [0.0, 0.25, 0.5, 0.75, 1.0]
-        gradientLocationAnimation.toValue = [0.0, 0.3, 0.6, 0.8, 1.0]
-        gradientLocationAnimation.duration = 18.0
-        gradientLocationAnimation.autoreverses = true
-        gradientLocationAnimation.repeatCount = Float.infinity
-        gradientLocationAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        mainGradientLayer.add(gradientLocationAnimation, forKey: "locationChange")
-        
-        // Animate accent gradient - more movement
-        let accentGradAnimation = CABasicAnimation(keyPath: "colors")
-        accentGradAnimation.fromValue = [
-            NSColor(calibratedRed: 0.1, green: 0.3, blue: 0.5, alpha: 0.2).cgColor,
-            NSColor(calibratedRed: 0.2, green: 0.4, blue: 0.6, alpha: 0.0).cgColor,
-            NSColor(calibratedRed: 0.3, green: 0.5, blue: 0.2, alpha: 0.15).cgColor
-        ]
-        
-        accentGradAnimation.toValue = [
-            NSColor(calibratedRed: 0.15, green: 0.35, blue: 0.55, alpha: 0.25).cgColor,
-            NSColor(calibratedRed: 0.25, green: 0.45, blue: 0.2, alpha: 0.15).cgColor,
-            NSColor(calibratedRed: 0.1, green: 0.2, blue: 0.4, alpha: 0.1).cgColor
-        ]
-        
-        accentGradAnimation.duration = 20.0
-        accentGradAnimation.autoreverses = true
-        accentGradAnimation.repeatCount = Float.infinity
-        accentGradientLayer.add(accentGradAnimation, forKey: "accentColorChange")
-        
-        // Add position animation to the accent gradient for more movement
-        let accentPositionAnimation = CABasicAnimation(keyPath: "position")
-        accentPositionAnimation.fromValue = NSValue(point: NSPoint(x: 0, y: 0))
-        accentPositionAnimation.toValue = NSValue(point: NSPoint(x: 100, y: 100))
-        accentPositionAnimation.duration = 30.0
-        accentPositionAnimation.autoreverses = true
-        accentPositionAnimation.repeatCount = Float.infinity
-        accentPositionAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        accentGradientLayer.add(accentPositionAnimation, forKey: "positionChange")
-        
-        // Animate glow layers along different paths
-        for (index, glowLayer) in glowLayers.enumerated() {
-            animateGlowLayer(glowLayer, pathIndex: index, bounds: visualEffectView?.bounds ?? .zero)
-        }
-        
-        // Add light beams more frequently for more visible effect
-        let beamsTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: true) { [weak self] _ in
-            self?.addLightBeam(to: beamsLayer)
-        }
-        
-        // Add first couple beams immediately for immediate effect
-        addLightBeam(to: beamsLayer)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            self.addLightBeam(to: beamsLayer)
-        }
-        
-        // Create more particles for more visible effect
-        let particleTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            self.addParticle(to: particleLayer)
-        }
-        
-        // Add several particles immediately
-        for _ in 0..<5 {
-            addParticle(to: particleLayer)
-        }
-        
-        // Add the timers to common run loop mode
-        RunLoop.main.add(beamsTimer, forMode: .common)
-        RunLoop.main.add(particleTimer, forMode: .common)
-        
-        // Store timers for cleanup
-        animationTimer?.invalidate()
-        animationTimer = Timer.scheduledTimer(withTimeInterval: 100000, repeats: false) { _ in }
-        animationTimer?.invalidate() // Just a placeholder to store references
-        
-        // Store references to beams and particle timers
-        objc_setAssociatedObject(self, UnsafeRawPointer(bitPattern: 1)!, beamsTimer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        objc_setAssociatedObject(self, UnsafeRawPointer(bitPattern: 2)!, particleTimer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-    }
-    
-    private func animateGlowLayer(_ glowLayer: CALayer, pathIndex: Int, bounds: CGRect) {
-        let width = bounds.width
-        let height = bounds.height
-        
-        // Create a unique path for each glow
-        let glowPathAnimation = CAKeyframeAnimation(keyPath: "position")
+    // Animation for the nebula layers
+    private func animateNebulaLayer(_ layer: CALayer, index: Int, bounds: CGRect) {
+        // Very slow drift animation
+        let driftAnimation = CAKeyframeAnimation(keyPath: "position")
+        let startPoint = layer.position
+        let endPoint = CGPoint(x: startPoint.x + CGFloat.random(in: -100...100),
+                             y: startPoint.y + CGFloat.random(in: -100...100))
+        // Simple path for slow drift
         let path = CGMutablePath()
-        
-        switch pathIndex % 3 {
-        case 0: // Blue glow - follows a figure-8 path
-            path.move(to: CGPoint(x: width * 0.2, y: height * 0.2))
-            path.addCurve(
-                to: CGPoint(x: width * 0.8, y: height * 0.2),
-                control1: CGPoint(x: width * 0.4, y: height * 0.1),
-                control2: CGPoint(x: width * 0.6, y: height * 0.1)
-            )
-            path.addCurve(
-                to: CGPoint(x: width * 0.8, y: height * 0.8),
-                control1: CGPoint(x: width * 0.9, y: height * 0.4),
-                control2: CGPoint(x: width * 0.9, y: height * 0.6)
-            )
-            path.addCurve(
-                to: CGPoint(x: width * 0.2, y: height * 0.8),
-                control1: CGPoint(x: width * 0.6, y: height * 0.9),
-                control2: CGPoint(x: width * 0.4, y: height * 0.9)
-            )
-            path.addCurve(
-                to: CGPoint(x: width * 0.2, y: height * 0.2),
-                control1: CGPoint(x: width * 0.1, y: height * 0.6),
-                control2: CGPoint(x: width * 0.1, y: height * 0.4)
-            )
-        
-        case 1: // Green glow - follows a diagonal path
-            path.move(to: CGPoint(x: width * 0.1, y: height * 0.1))
-            path.addCurve(
-                to: CGPoint(x: width * 0.9, y: height * 0.9),
-                control1: CGPoint(x: width * 0.3, y: height * 0.5),
-                control2: CGPoint(x: width * 0.7, y: height * 0.5)
-            )
-            path.addCurve(
-                to: CGPoint(x: width * 0.1, y: height * 0.9),
-                control1: CGPoint(x: width * 0.7, y: height * 0.7),
-                control2: CGPoint(x: width * 0.3, y: height * 0.7)
-            )
-            path.addCurve(
-                to: CGPoint(x: width * 0.9, y: height * 0.1),
-                control1: CGPoint(x: width * 0.3, y: height * 0.3),
-                control2: CGPoint(x: width * 0.7, y: height * 0.3)
-            )
-            path.addCurve(
-                to: CGPoint(x: width * 0.1, y: height * 0.1),
-                control1: CGPoint(x: width * 0.5, y: width * 0.2),
-                control2: CGPoint(x: width * 0.3, y: width * 0.1)
-            )
-        
-        case 2: // Grey glow - follows an oval path
-            path.move(to: CGPoint(x: width * 0.5, y: height * 0.2))
-            path.addCurve(
-                to: CGPoint(x: width * 0.8, y: height * 0.5),
-                control1: CGPoint(x: width * 0.7, y: height * 0.2),
-                control2: CGPoint(x: width * 0.8, y: height * 0.3)
-            )
-            path.addCurve(
-                to: CGPoint(x: width * 0.5, y: height * 0.8),
-                control1: CGPoint(x: width * 0.8, y: height * 0.7),
-                control2: CGPoint(x: width * 0.7, y: height * 0.8)
-            )
-            path.addCurve(
-                to: CGPoint(x: width * 0.2, y: height * 0.5),
-                control1: CGPoint(x: width * 0.3, y: height * 0.8),
-                control2: CGPoint(x: width * 0.2, y: height * 0.7)
-            )
-            path.addCurve(
-                to: CGPoint(x: width * 0.5, y: height * 0.2),
-                control1: CGPoint(x: width * 0.2, y: height * 0.3),
-                control2: CGPoint(x: width * 0.3, y: height * 0.2)
-            )
-        default:
-            break
-        }
-        
-        // Configure the animation
-        glowPathAnimation.path = path
-        glowPathAnimation.duration = 60.0 + Double(pathIndex * 10) // Stagger durations
-        glowPathAnimation.calculationMode = .paced
-        glowPathAnimation.rotationMode = .rotateAuto
-        glowPathAnimation.repeatCount = Float.infinity
-        glowPathAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        glowLayer.add(glowPathAnimation, forKey: "positionAnimation")
-        
-        // Add a subtle scale animation
-        let scaleAnimation = CABasicAnimation(keyPath: "transform.scale")
-        scaleAnimation.fromValue = 0.9
-        scaleAnimation.toValue = 1.1
-        scaleAnimation.duration = 15.0 + Double(pathIndex * 5)
-        scaleAnimation.autoreverses = true
-        scaleAnimation.repeatCount = Float.infinity
-        scaleAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        glowLayer.add(scaleAnimation, forKey: "scaleAnimation")
-        
-        // Add a subtle opacity animation
-        let opacityAnimation = CABasicAnimation(keyPath: "opacity")
-        opacityAnimation.fromValue = 0.7
-        opacityAnimation.toValue = 1.0
-        opacityAnimation.duration = 12.0 + Double(pathIndex * 3)
-        opacityAnimation.autoreverses = true
-        opacityAnimation.repeatCount = Float.infinity
-        opacityAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        glowLayer.add(opacityAnimation, forKey: "opacityAnimation")
+        path.move(to: startPoint)
+        path.addLine(to: endPoint)
+        driftAnimation.path = path
+        driftAnimation.duration = 120.0 + Double.random(in: -20...20) // Long, varied duration
+        driftAnimation.autoreverses = true
+        driftAnimation.repeatCount = .infinity
+        driftAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(driftAnimation, forKey: "nebulaDrift")
+
+        // Slow fade in/out
+        let fadeAnimation = CAKeyframeAnimation(keyPath: "opacity")
+        fadeAnimation.values = [0.0, 1.0, 1.0, 0.0] // Fade in, stay, fade out
+        fadeAnimation.keyTimes = [0.0, 0.15, 0.85, 1.0] // Control fade timing
+        fadeAnimation.duration = 60.0 + Double.random(in: -10...10) // Long fade cycle
+        fadeAnimation.repeatCount = .infinity
+        // Stagger start times slightly
+        fadeAnimation.beginTime = CACurrentMediaTime() + Double(index) * 5.0 
+        layer.add(fadeAnimation, forKey: "nebulaFade")
     }
     
-    private func addLightBeam(to layer: CALayer) {
-        guard let bounds = visualEffectView?.bounds else { return }
-        
-        // Create a light beam with more visibility
-        let beamLayer = CALayer()
-        let width = CGFloat.random(in: 70...200)
-        let height = bounds.height * 2
-        beamLayer.frame = CGRect(x: 0, y: 0, width: width, height: height)
-        
-        // Rotate the beam
-        let angle = CGFloat.random(in: -20...20) * CGFloat.pi / 180
-        beamLayer.anchorPoint = CGPoint(x: 0.5, y: 0)
-        beamLayer.position = CGPoint(x: CGFloat.random(in: 0...bounds.width), y: 0)
-        beamLayer.transform = CATransform3DMakeRotation(angle, 0, 0, 1)
-        
-        // Choose colors randomly for variety
-        let colorChoice = Int.random(in: 0...3)
-        let beamColor: NSColor
-        
-        switch colorChoice {
-        case 0:
-            beamColor = NSColor(calibratedRed: 0.2, green: 0.4, blue: 0.8, alpha: 1.0) // Blue
-        case 1:
-            beamColor = NSColor(calibratedRed: 0.3, green: 0.5, blue: 0.2, alpha: 1.0) // Green
-        case 2:
-            beamColor = NSColor(calibratedRed: 0.4, green: 0.4, blue: 0.5, alpha: 1.0) // Grey
-        case 3:
-            beamColor = NSColor(calibratedRed: 0.1, green: 0.3, blue: 0.4, alpha: 1.0) // Teal
-        default:
-            beamColor = NSColor.white
-        }
-        
-        // Create a gradient for the beam - higher opacity for more visibility
-        let gradientLayer = CAGradientLayer()
-        gradientLayer.frame = beamLayer.bounds
-        gradientLayer.colors = [
-            NSColor.clear.cgColor,
-            beamColor.withAlphaComponent(CGFloat.random(in: 0.03...0.07)).cgColor,
-            NSColor.clear.cgColor
-        ]
-        gradientLayer.locations = [0.0, 0.5, 1.0]
-        gradientLayer.startPoint = CGPoint(x: 0.5, y: 0)
-        gradientLayer.endPoint = CGPoint(x: 0.5, y: 1)
-        beamLayer.addSublayer(gradientLayer)
-        
-        layer.addSublayer(beamLayer)
-        
-        // Animate the beam - slowly fade in and out
-        let fadeAnimation = CABasicAnimation(keyPath: "opacity")
-        fadeAnimation.fromValue = 0
-        fadeAnimation.toValue = 1
-        fadeAnimation.duration = CGFloat.random(in: 3...8)
-        fadeAnimation.autoreverses = true
-        fadeAnimation.fillMode = .forwards
-        fadeAnimation.isRemovedOnCompletion = false
-        beamLayer.opacity = 0
-        beamLayer.add(fadeAnimation, forKey: "fadeAnimation")
-        
-        // Remove the beam after animation completes
-        DispatchQueue.main.asyncAfter(deadline: .now() + 16.0) {
-            beamLayer.removeFromSuperlayer()
-        }
-    }
-    
+    // Add subtle particle with drift
     private func addParticle(to layer: CALayer) {
-        guard let bounds = visualEffectView?.bounds else { return }
+        let particle = CALayer()
+        let size = CGFloat.random(in: 1.0...2.5)
+        particle.frame = CGRect(x: CGFloat.random(in: 0...layer.bounds.width),
+                                y: CGFloat.random(in: 0...layer.bounds.height),
+                                width: size, height: size)
+        particle.backgroundColor = NSColor.white.withAlphaComponent(CGFloat.random(in: 0.1...0.4)).cgColor
+        particle.cornerRadius = size / 2
+        particle.opacity = 0 // Start invisible
+        layer.addSublayer(particle)
+
+        // Animations
+        let driftX = CGFloat.random(in: 20...50) // Gentle upward-right drift
+        let driftY = CGFloat.random(in: -50...(-20))
+        let duration = TimeInterval.random(in: 8...15)
+
+        let positionAnimation = CABasicAnimation(keyPath: "position")
+        positionAnimation.fromValue = particle.position
+        positionAnimation.toValue = CGPoint(x: particle.position.x + driftX, y: particle.position.y + driftY)
+        positionAnimation.duration = duration
+        positionAnimation.timingFunction = CAMediaTimingFunction(name: .linear)
+
+        let fadeAnimation = CAKeyframeAnimation(keyPath: "opacity")
+        fadeAnimation.values = [0.0, 1.0, 1.0, 0.0]
+        fadeAnimation.keyTimes = [0.0, 0.1, 0.8, 1.0]
+        fadeAnimation.duration = duration
         
-        // Create slightly larger particles with more color variety
-        let size = CGFloat.random(in: 1.5...4.0)
-        let particleLayer = CALayer()
+        let group = CAAnimationGroup()
+        group.animations = [positionAnimation, fadeAnimation]
+        group.duration = duration
         
-        // Choose random color for variety
-        let colorChoice = Int.random(in: 0...4)
-        let particleColor: NSColor
-        
-        switch colorChoice {
-        case 0:
-            particleColor = NSColor.white
-        case 1:
-            particleColor = NSColor(calibratedRed: 0.3, green: 0.6, blue: 0.9, alpha: 1.0) // Light blue
-        case 2:
-            particleColor = NSColor(calibratedRed: 0.4, green: 0.7, blue: 0.3, alpha: 1.0) // Light green
-        case 3:
-            particleColor = NSColor(calibratedRed: 0.5, green: 0.5, blue: 0.6, alpha: 1.0) // Light grey
-        case 4:
-            particleColor = NSColor(calibratedRed: 0.7, green: 0.7, blue: 0.3, alpha: 1.0) // Yellowish
-        default:
-            particleColor = NSColor.white
+        particle.add(group, forKey: "particleAnimation")
+
+        // Remove layer after animation
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
+            particle.removeFromSuperlayer()
         }
+    }
+    
+    // Add comet trail effect
+    private func addCometTrail(to layer: CALayer) {
+        let comet = CAShapeLayer()
+        let path = CGMutablePath()
+        let startX = CGFloat.random(in: 0...layer.bounds.width)
+        let startY = CGFloat.random(in: 0...layer.bounds.height)
+        let length = CGFloat.random(in: 50...150)
+        let angle = CGFloat.random(in: 0...(2 * .pi))
+        let endX = startX + length * cos(angle)
+        let endY = startY + length * sin(angle)
         
-        particleLayer.backgroundColor = particleColor.withAlphaComponent(CGFloat.random(in: 0.05...0.15)).cgColor
-        particleLayer.cornerRadius = size / 2
+        path.move(to: CGPoint(x: startX, y: startY))
+        path.addLine(to: CGPoint(x: endX, y: endY))
         
-        // Random position
-        let randomX = CGFloat.random(in: 0...bounds.width)
-        let randomY = CGFloat.random(in: 0...bounds.height)
-        particleLayer.frame = CGRect(x: randomX, y: randomY, width: size, height: size)
+        comet.path = path
+        comet.lineWidth = CGFloat.random(in: 1.0...2.0)
+        // Accent color (e.g., soft gold or cyan)
+        let accentColor = NSColor(calibratedRed: 0.8, green: 0.7, blue: 0.3, alpha: 0.7) 
+        comet.strokeColor = accentColor.cgColor
+        comet.opacity = 0 // Start invisible
         
-        layer.addSublayer(particleLayer)
-        
-        // Add a subtle movement to particles
-        let moveAnimation = CABasicAnimation(keyPath: "position")
-        let endX = randomX + CGFloat.random(in: -30...30)
-        let endY = randomY + CGFloat.random(in: -30...30)
-        moveAnimation.fromValue = NSValue(point: NSPoint(x: randomX, y: randomY))
-        moveAnimation.toValue = NSValue(point: NSPoint(x: endX, y: endY))
-        moveAnimation.duration = CGFloat.random(in: 8...15)
-        moveAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        
-        // Animate opacity with slower, more subtle transitions
-        let fadeAnimation = CABasicAnimation(keyPath: "opacity")
-        fadeAnimation.fromValue = 0.0
-        fadeAnimation.toValue = 1.0
-        fadeAnimation.duration = 3.0
-        fadeAnimation.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        // Use lineDashPhase animation for trail effect
+        comet.lineDashPattern = [NSNumber(value: length), NSNumber(value: length)] // Dash = length, Gap = length
+        comet.lineCap = .round
+        layer.addSublayer(comet)
+
+        let duration = TimeInterval.random(in: 1.5...3.0)
+
+        let dashAnimation = CABasicAnimation(keyPath: "lineDashPhase")
+        dashAnimation.fromValue = -length // Start with the gap showing
+        dashAnimation.toValue = length    // End with the dash having moved through
+        dashAnimation.duration = duration
+        dashAnimation.timingFunction = CAMediaTimingFunction(name: .easeOut)
         
         let fadeOutAnimation = CABasicAnimation(keyPath: "opacity")
         fadeOutAnimation.fromValue = 1.0
         fadeOutAnimation.toValue = 0.0
-        fadeOutAnimation.duration = 3.0
-        fadeOutAnimation.beginTime = 6.0
-        fadeOutAnimation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        fadeOutAnimation.duration = duration * 0.6 // Fade out quicker
+        fadeOutAnimation.beginTime = duration * 0.4 // Start fading after head passes
+        fadeOutAnimation.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        fadeOutAnimation.fillMode = .forwards
+        fadeOutAnimation.isRemovedOnCompletion = false // Keep final state
         
-        let animationGroup = CAAnimationGroup()
-        animationGroup.animations = [moveAnimation, fadeAnimation, fadeOutAnimation]
-        animationGroup.duration = 9.0
+        let fadeInAnimation = CABasicAnimation(keyPath: "opacity")
+        fadeInAnimation.fromValue = 0.0
+        fadeInAnimation.toValue = 1.0
+        fadeInAnimation.duration = duration * 0.2 // Quick fade in
+        fadeInAnimation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+
+        let group = CAAnimationGroup()
+        group.animations = [dashAnimation, fadeInAnimation, fadeOutAnimation]
+        group.duration = duration
         
-        particleLayer.add(animationGroup, forKey: "animations")
-        
-        // Remove the particle after animation completes
-        DispatchQueue.main.asyncAfter(deadline: .now() + 9.0) {
-            particleLayer.removeFromSuperlayer()
+        comet.add(group, forKey: "cometAnimation")
+
+        // Remove layer after animation
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.1) {
+            comet.removeFromSuperlayer()
         }
     }
     
@@ -788,13 +563,22 @@ class OverlayWindowController: NSWindowController {
         }
         
         // Clean up timers
-        animationTimer?.invalidate()
-        animationTimer = nil
+        cleanupTimers()
+    }
+    
+    // Cleanup timers and layers
+    private func cleanupTimers() {
+        for timer in animationTimers {
+            timer.invalidate()
+        }
+        animationTimers.removeAll()
     }
     
     deinit {
-        // Clean up timers
-        animationTimer?.invalidate()
-        animationTimer = nil
+        print("OverlayWindowController deinit")
+        cleanupTimers()
+        // Optionally remove background layers if needed, though window closure handles this
+        backgroundLayers.forEach { $0.removeFromSuperlayer() }
+        backgroundLayers.removeAll()
     }
 } 
