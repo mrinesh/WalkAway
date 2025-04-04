@@ -38,10 +38,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     // Motivational messages
     let motivationalMessages = [
-        "Stand up, stretch, take a walk. Your body will thank you!",
-        "Hydrate! A quick glass of water can make a difference.",
+        "Stand up, stretch, take a walk. Your body will thank you and so will your mind!",
+        "Hydrate! A quick glass of water will go a long way :)",
         "Look out the window, focus on something distant. Rest your eyes.",
-        "Deep breaths. Relax your shoulders.",
+        "Deep breaths. Relax your shoulders. Take a short walk around the room",
         "Time for a quick break! Step away and recharge."
     ]
     var currentMessage = ""
@@ -184,6 +184,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         overlayWindowController?.close()
         overlayWindowController = nil
+        
+        // Play a sound to indicate the break is over
+        NSSound(named: "Glass")?.play()
         
         // Restart the main timer
         startBreakTimer()
