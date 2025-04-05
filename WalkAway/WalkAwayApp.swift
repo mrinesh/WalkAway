@@ -82,7 +82,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "eye.fill", accessibilityDescription: "WalkAway")
+            button.image = NSImage(systemSymbolName: "figure.walk", accessibilityDescription: "WalkAway")
             button.action = #selector(togglePopover)
             button.target = self
         }
@@ -223,27 +223,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         isPreBreakWarningActive = false
         isBreakActive = true
         
-        // Determine break duration (short/long)
+        // Determine break duration and skippable status
         breakCycleCount += 1
         let isLongBreak = (breakCycleCount % 3 == 0)
         if isLongBreak {
             remainingSeconds = longBreakDurationSeconds
-            print("Triggering LONG break (\(remainingSeconds)s)")
+            print("Triggering LONG (non-skippable) break (\(remainingSeconds)s)")
         } else {
             remainingSeconds = shortBreakDurationSeconds
-            print("Triggering SHORT break (\(remainingSeconds)s)")
+            print("Triggering SHORT (skippable) break (\(remainingSeconds)s)")
         }
         if breakCycleCount >= 99 { breakCycleCount = 0 }
         
         currentMessage = motivationalMessages.randomElement() ?? "Take a break!"
         
-        // Create and show overlay windows
+        // Create and show overlay windows, passing skippable status
         overlayWindowControllers.forEach { $0.close() }
         overlayWindowControllers = []
         for screen in NSScreen.screens {
-            let overlayController = OverlayWindowController(screen: screen)
+            let overlayController = OverlayWindowController(screen: screen, isSkippable: !isLongBreak) // Pass false if it's a long break
             overlayController.currentMessage = currentMessage
-            overlayController.skipCallback = { [weak self] in self?.finishBreak(skipped: true) }
+            overlayController.skipCallback = { [weak self] in 
+                // This callback should only be possible if it IS skippable
+                self?.finishBreak(skipped: true) 
+            }
             overlayController.showWindow(nil)
             overlayWindowControllers.append(overlayController)
         }

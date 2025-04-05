@@ -43,9 +43,10 @@ class OverlayWindowController: NSWindowController {
     // Remove message timer - AppDelegate handles message selection
     // private var messageTimer: Timer?
     private var skipButton: NSButton?
+    var isSkippable: Bool = true // Property to control button visibility
     
-    // Updated initializer to accept a specific screen
-    convenience init(screen: NSScreen) {
+    // Updated initializer to accept a specific screen and skippable status
+    convenience init(screen: NSScreen, isSkippable: Bool) {
         // 1. Create a basic window without explicit frame or screen initially
         let window = NSWindow(
             contentRect: .zero, // Start with zero rect
@@ -65,20 +66,22 @@ class OverlayWindowController: NSWindowController {
         // 2. Initialize the NSWindowController
         self.init(window: window)
         
-        // 3. NOW set the frame explicitly using the screen's global coordinates
+        // 3. Set skippable status
+        self.isSkippable = isSkippable
+        
+        // 4. NOW set the frame explicitly using the screen's global coordinates
         window.setFrame(screen.frame, display: true)
         
-        // 4. Set up content view (now that the frame should be correctly set)
+        // 5. Set up content view (now that the frame should be correctly set)
         setupContentView()
     }
     
-    // Default convenience init (can be removed if not needed elsewhere, 
-    // but kept for now in case of future use or direct initialization needs)
+    // Default convenience init (update if needed, or remove if only screen-specific init is used)
     convenience init() {
         guard let mainScreen = NSScreen.main else {
             fatalError("Could not find main screen for default init")
         }
-        self.init(screen: mainScreen)
+        self.init(screen: mainScreen, isSkippable: true) // Default to skippable
     }
     
     // Remove internal random message function
@@ -172,12 +175,21 @@ class OverlayWindowController: NSWindowController {
         glowView.layer?.shadowRadius = 40
         glowView.layer?.shadowOpacity = 1.0
         
-        // Create a properly styled skip button
-        let skipButton = createSkipButton()
-        self.skipButton = skipButton
+        // --- Conditional Skip Button / Text --- 
+        let skipControl: NSView // Use NSView as common type for stack
+        if isSkippable {
+            let button = createSkipButton()
+            self.skipButton = button // Store reference if needed
+            skipControl = button
+        } else {
+            let nonSkippableLabel = createStyledLabel(text: "Non Skippable Break", fontSize: 15, weight: .medium)
+            nonSkippableLabel.textColor = NSColor.white.withAlphaComponent(0.6) // Make it less prominent
+            skipControl = nonSkippableLabel
+        }
+        // --- End Conditional --- 
         
         // Create a stack for vertical layout
-        let stackView = NSStackView(views: [messageLabel, timerLabel, skipButton])
+        let stackView = NSStackView(views: [messageLabel, timerLabel, skipControl])
         stackView.orientation = .vertical
         stackView.alignment = .centerX
         stackView.distribution = .equalSpacing
