@@ -710,34 +710,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         
-        print("\n--- Checking for Active Meetings ---")
-        
         // Check for Zoom meetings (CptHost process)
         let zoomMeetingActive = ProcessInfo.processInfo.processIdentifier != 0 &&
             NSRunningApplication.runningApplications(withBundleIdentifier: "us.zoom.CptHost").count > 0
-        print("Zoom meeting active: \(zoomMeetingActive)")
             
         // Check for Teams meetings
         let teamsMeetingActive = {
-            print("\nChecking Teams status:")
-            
             // First check if Teams is running
-            let runningTeams = NSWorkspace.shared.runningApplications.filter { app in
-                // Print all running apps for debugging
-                print("Checking app: \(app.localizedName ?? "unknown") (executable: \(app.executableURL?.lastPathComponent ?? "unknown"))")
-                
-                // Check both localizedName and executable name
-                let isTeams = app.localizedName == "Microsoft Teams" || 
-                             app.executableURL?.lastPathComponent == "MSTeams" ||
-                             app.executableURL?.lastPathComponent == "Microsoft Teams"
-                if isTeams {
-                    print("Found Teams process: Name='\(app.localizedName ?? "unknown")', Executable='\(app.executableURL?.lastPathComponent ?? "unknown")' (PID: \(app.processIdentifier))")
-                }
-                return isTeams
-            }
-            
-            guard let teamsApp = runningTeams.first else {
-                print("Teams is not running")
+            guard let teamsApp = NSWorkspace.shared.runningApplications.first(where: { $0.executableURL?.lastPathComponent == "MSTeams" }) else {
                 teamsCPUHistory.removeAll()
                 lastCPUTime = nil
                 lastCPUCheckTime = nil
@@ -767,7 +747,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 
                 // Calculate percentage based on time difference
                 cpuUsage = ((userDiff + systemDiff) / (timeDiff * 10_000_000.0)) * 100.0
-                print("Current Teams CPU Usage: \(String(format: "%.2f", cpuUsage))%")
                 
                 // Update CPU history
                 teamsCPUHistory.append(cpuUsage)
@@ -782,13 +761,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             
             // Calculate average CPU usage
             let averageCPU = teamsCPUHistory.isEmpty ? 0.0 : teamsCPUHistory.reduce(0.0, +) / Double(teamsCPUHistory.count)
-            print("CPU History: [\(teamsCPUHistory.map { String(format: "%.2f", $0) }.joined(separator: ", "))]")
-            print("Average CPU Usage (last \(teamsCPUHistory.count * 2)s): \(String(format: "%.2f", averageCPU))%")
             
             // Consider meeting active if average CPU usage is above 10%
-            let isActive = averageCPU > 10.0
-            print("\nTeams meeting detection result: \(isActive ? "ACTIVE" : "NOT ACTIVE")")
-            return isActive
+            return averageCPU > 10.0
         }()
         
         // Meeting is active if either Zoom or Teams is in a meeting
@@ -805,8 +780,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             print("No active meetings detected. Resuming timer.")
             resumeTimer()
         }
-        
-        print("--- End Meeting Check ---\n")
     }
 }
 
