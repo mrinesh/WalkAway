@@ -40,6 +40,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var overlayWindowControllers: [OverlayWindowController] = []
     var notificationWindowController: NotificationWindowController? // Controller for the notification popup
     private var uiUpdateTimer: Timer?
+    private var meetingCheckTimer: Timer? // Added: Timer to check for active meetings
     
     // Settings (persisted with UserDefaults)
     @AppStorage("breakFrequencyMinutes") var breakFrequencyMinutes: Int = 20
@@ -47,14 +48,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @AppStorage("longBreakDurationSeconds") var longBreakDurationSeconds: Int = 60  // Added
     @AppStorage("breakCycleCount") var breakCycleCount: Int = 0 // Added break counter
     @AppStorage("launchAtLoginEnabled") var launchAtLoginEnabled: Bool = false // Added for launch setting
+    @AppStorage("pauseForMeetingAppsEnabled") var pauseForMeetingAppsEnabled: Bool = false // Added missing binding
     
     // Constants
     let preBreakWarningDuration: TimeInterval = 30.0 // Duration of the warning popup
+    let targetMeetingAppBundleIDs: Set<String> = [
+        "us.zoom.xos",             // Zoom
+        "com.microsoft.teams",     // Microsoft Teams
+        "com.webex.meetingmanager",// Webex Meetings App (may vary)
+        "Cisco-Systems.Spark",    // Webex App (newer)
+        "com.skype.skype",         // Skype
+        // Browser-based are harder - might need to add Safari/Chrome/Edge if GMeet detection is critical, but it's less precise
+        // "com.apple.Safari",
+        // "com.google.Chrome",
+        // "com.microsoft.edgemac"
+    ]
+    // Add missing declaration for ownBundleID
+    let ownBundleID = Bundle.main.bundleIdentifier ?? "com.example.WalkAway" // Get own ID, provide fallback
     
     // Current state
     var isBreakActive = false
     var remainingSeconds = 0 // Remaining seconds *during* a break
     var isPreBreakWarningActive = false // Is the 30s warning active?
+    var pausedForMeetingApp: Bool = false // Added missing property declaration
     
     // Motivational messages
     let motivationalMessages = [
@@ -76,15 +92,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc dynamic var timeUntilBreakFormatted: String = "--:--"
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("App launched. Setting up status bar.")
+        // Use self.ownBundleID to resolve scope
+        print("App launched. Own bundle ID: \(self.ownBundleID)") 
         
         // Set up status item in menu bar
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         
+        // Add workspace notification observer for app switching
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleAppActivation(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
+        
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "figure.walk", accessibilityDescription: "WalkAway")
+            // Restore direct action to open popover on click
             button.action = #selector(togglePopover)
-            button.target = self
+            button.target = self 
         }
         
         // Set up popover with SwiftUI content
@@ -99,7 +125,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             shortBreakDurationSeconds: $shortBreakDurationSeconds, // Use renamed binding
             longBreakDurationSeconds: $longBreakDurationSeconds, // Pass new binding
             launchAtLoginEnabled: $launchAtLoginEnabled, // Pass launch setting binding
+            pauseForMeetingAppsEnabled: $pauseForMeetingAppsEnabled, // Pass meeting pause setting binding
             isPaused: { [weak self] in self?.isPaused ?? false },
+            isPausedForMeeting: { [weak self] in self?.pausedForMeetingApp ?? false },
             timeUntilBreak: { [weak self] in self?.timeUntilBreakFormatted ?? "--:--" },
             onSettingsChanged: { [weak self] in
                 self?.restartBreakTimer()
@@ -124,6 +152,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Start the break timer
         startBreakTimer()
+        
+        // Start periodic meeting check timer
+        startMeetingCheckTimer()
     }
     
     @objc func togglePopover() {
@@ -312,9 +343,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         timer?.invalidate()
         finalCountdownTimer?.invalidate()
         uiUpdateTimer?.invalidate()
+        meetingCheckTimer?.invalidate() // Added: Invalidate meeting check timer
         timer = nil
         finalCountdownTimer = nil
         uiUpdateTimer = nil
+        meetingCheckTimer = nil
     }
     
     func formatTime(seconds: Int) -> String {
@@ -361,38 +394,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         timeUntilBreakFormatted = formatTime(seconds: Int(currentRemaining))
     }
     
-    func pauseTimer() {
+    // Modified pauseTimer definition to accept meeting pause state
+    func pauseTimer(isMeetingPause: Bool = false) { 
         guard !isPaused && !isBreakActive else { return }
         
         let now = Date()
         if let startTime = timerStartTime {
             let elapsed = now.timeIntervalSince(startTime)
-            
             if isPreBreakWarningActive {
-                // Paused during final countdown
                 remainingPreBreakTime = max(0, preBreakWarningDuration - elapsed)
                 finalCountdownTimer?.invalidate()
                 finalCountdownTimer = nil
                 print("Timer paused during pre-break warning with \(formatTime(seconds: Int(remainingPreBreakTime))) remaining")
             } else {
-                // Paused during main countdown
                 let fullBreakInterval = TimeInterval(breakFrequencyMinutes * 60)
                 remainingTimeUntilBreak = max(0, fullBreakInterval - elapsed)
                 timer?.invalidate()
                 timer = nil
-                print("Timer paused with \(formatTime(seconds: Int(remainingTimeUntilBreak))) remaining until break")
+                 print("Timer paused with \(formatTime(seconds: Int(remainingTimeUntilBreak))) remaining until break")
             }
         }
         
-        timerStartTime = nil // Clear start time
+        timerStartTime = nil
         isPaused = true
-        updateTimeDisplay() // Update display to show paused time
+        pausedForMeetingApp = isMeetingPause // Set the flag if it's a meeting pause
+        
+        if isMeetingPause {
+            showPauseNotification(message: "Timer paused for Meeting App")
+        }
+        
+        updateTimeDisplay()
     }
     
     func resumeTimer() {
         guard isPaused && !isBreakActive else { return }
         
-        timerStartTime = Date() // Set new start time for resumed phase
+        // Set new start time based on the remaining time
+        let now = Date()
         
         if remainingPreBreakTime > 0 {
             // Resuming final countdown
@@ -402,12 +440,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             RunLoop.main.add(finalCountdownTimer!, forMode: .common)
             isPreBreakWarningActive = true // Ensure flag is set
+            timerStartTime = now.addingTimeInterval(-1 * (preBreakWarningDuration - remainingPreBreakTime))
             remainingPreBreakTime = 0 // Clear stored value
         } else {
-            // Resuming main countdown
-            // Calculate time until warning needs to trigger
+            // Resuming main countdown with exact remaining time
+            let fullBreakInterval = TimeInterval(breakFrequencyMinutes * 60)
             let intervalUntilWarning = max(0, remainingTimeUntilBreak - preBreakWarningDuration)
             print("Resuming main timer with \(formatTime(seconds: Int(remainingTimeUntilBreak))) remaining until break (warning in \(formatTime(seconds: Int(intervalUntilWarning))))")
+            
+            // Calculate what time the timer would have started to have this much time remaining
+            timerStartTime = now.addingTimeInterval(-1 * (fullBreakInterval - remainingTimeUntilBreak))
             
             if intervalUntilWarning <= 0 {
                 // If remaining time is less than warning duration, trigger warning immediately
@@ -422,6 +464,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         isPaused = false
+        pausedForMeetingApp = false // Reset meeting pause flag
         updateTimeDisplay() // Update display immediately
     }
     
@@ -431,6 +474,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             pauseTimer()
         }
+    }
+
+    // Helper to show temporary notifications (Fix for Error 1)
+    func showPauseNotification(message: String) {
+        notificationWindowController?.closeNotificationImmediately()
+        notificationWindowController = NotificationWindowController(message: message)
+        notificationWindowController?.showNotification()
     }
 
     // MARK: - Sleep/Wake Handling
@@ -508,10 +558,157 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    // MARK: - Meeting App Handling & Activation
+    @objc func handleAppActivation(_ notification: Notification) {
+        guard pauseForMeetingAppsEnabled else { return } // Only act if feature is enabled
+        
+        guard let activatedApp = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              let bundleID = activatedApp.bundleIdentifier else { return }
+              
+        // Check specifically for Zoom activation
+        if bundleID == "us.zoom.xos" {
+            // Check if timer is actively running
+            if !isPaused && !isBreakActive && !isPreBreakWarningActive {
+                
+                // Get all windows
+                let options = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
+                guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[CFString: Any]] else { return }
+                
+                // Look specifically for Zoom meeting windows
+                var zoomMeetingActive = false
+                let zoomPID = activatedApp.processIdentifier
+                
+                print("Checking Zoom windows for PID: \(zoomPID)")
+                
+                for windowDict in windowList {
+                    guard let ownerPID = windowDict[kCGWindowOwnerPID] as? pid_t,
+                          ownerPID == zoomPID,
+                          let isOnscreen = windowDict[kCGWindowIsOnscreen] as? Bool,
+                          isOnscreen,
+                          let alpha = windowDict[kCGWindowAlpha] as? Double,
+                          alpha > 0 else { continue }
+                    
+                    // Debug: Print window names to help identify patterns
+                    if let name = windowDict[kCGWindowName] as? String {
+                        print("Found Zoom window: '\(name)'")
+                    }
+                    
+                    // Check for any window name that indicates an active meeting
+                    if let windowName = windowDict[kCGWindowName] as? String {
+                        // Common Zoom meeting window patterns
+                        let meetingPatterns = [
+                            "Zoom Meeting",
+                            "zoom share",
+                            "Zoom Webinar",
+                            "Zoom Video",
+                            "Meeting Controls",
+                            "Zoom Group Chat",
+                            "Participants",
+                            "Chat",
+                            "Share Screen",
+                            "Audio Conference"
+                        ]
+                        
+                        // Check if window name contains any of our patterns
+                        if meetingPatterns.contains(where: { windowName.contains($0) }) ||
+                           // Also check for common meeting UI elements
+                           (windowName.contains("Zoom") && 
+                            (windowName.contains("Controls") || 
+                             windowName.contains("Participants") || 
+                             windowName.contains("Share"))) {
+                            print("Detected active meeting window: '\(windowName)'")
+                            zoomMeetingActive = true
+                            break
+                        }
+                    }
+                }
+
+                if zoomMeetingActive {
+                    print("Zoom meeting detected. Pausing timer.")
+                    pauseTimer(isMeetingPause: true)
+                } else {
+                    print("Zoom is open but no active meeting detected. Timer continues.")
+                    // If timer was paused for a meeting and meeting ended, resume
+                    if isPaused && pausedForMeetingApp {
+                        resumeTimer()
+                    }
+                }
+            }
+        } else if bundleID == ownBundleID { 
+            // WalkAway itself became active
+            if isPaused && pausedForMeetingApp {
+                // Check if Zoom still has an active meeting before resuming
+                if let zoomApp = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "us.zoom.xos" }) {
+                    let options = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
+                    if let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[CFString: Any]] {
+                        var meetingStillActive = false
+                        let zoomPID = zoomApp.processIdentifier
+                        
+                        for windowDict in windowList {
+                            if let ownerPID = windowDict[kCGWindowOwnerPID] as? pid_t,
+                               ownerPID == zoomPID,
+                               let windowName = windowDict[kCGWindowName] as? String,
+                               let isOnscreen = windowDict[kCGWindowIsOnscreen] as? Bool,
+                               isOnscreen,
+                               (windowName.contains("Zoom Meeting") || 
+                                windowName.contains("zoom share") ||
+                                windowName.contains("zoom share statusbar window")) {
+                                meetingStillActive = true
+                                break
+                            }
+                        }
+                        
+                        if !meetingStillActive {
+                            print("WalkAway activated and no active Zoom meeting detected. Resuming timer.")
+                            resumeTimer()
+                        }
+                    }
+                } else {
+                    // Zoom is not running anymore, safe to resume
+                    print("WalkAway activated and Zoom not running. Resuming timer.")
+                    resumeTimer()
+                }
+            }
+        }
+        // Note: Logic for other meeting apps (Teams, etc.) is currently removed based on the request
+        // To re-add, you would replicate the Zoom check structure for their bundle IDs.
+    }
+    
     // MARK: - Cleanup
     deinit {
         NSWorkspace.shared.notificationCenter.removeObserver(self) // Remove observers
         invalidateAllTimers()
+    }
+
+    // Added: New function to start meeting check timer
+    func startMeetingCheckTimer() {
+        meetingCheckTimer?.invalidate()
+        meetingCheckTimer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.checkForActiveMeetings()
+        }
+        if let timer = meetingCheckTimer {
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+    
+    // Added: New function to check for active meetings
+    func checkForActiveMeetings() {
+        guard pauseForMeetingAppsEnabled,
+              !isBreakActive else {
+            return
+        }
+        
+        // Check for CptHost process using Process Info
+        let meetingActive = ProcessInfo.processInfo.processIdentifier != 0 &&
+            NSRunningApplication.runningApplications(withBundleIdentifier: "us.zoom.CptHost").count > 0
+        
+        if meetingActive && !isPaused {
+            print("Zoom meeting detected (CptHost process found). Pausing timer.")
+            pauseTimer(isMeetingPause: true)
+        } else if !meetingActive && isPaused && pausedForMeetingApp {
+            print("No Zoom meeting detected (CptHost process not found). Resuming timer.")
+            resumeTimer()
+        }
     }
 }
 
@@ -522,8 +719,10 @@ struct SettingsView: View {
     @Binding var shortBreakDurationSeconds: Int
     @Binding var longBreakDurationSeconds: Int
     @Binding var launchAtLoginEnabled: Bool
+    @Binding var pauseForMeetingAppsEnabled: Bool
     
     var isPaused: () -> Bool
+    var isPausedForMeeting: () -> Bool
     var timeUntilBreak: () -> String
     var onSettingsChanged: () -> Void
     var onPauseResumeToggled: () -> Void
@@ -543,7 +742,9 @@ struct SettingsView: View {
          shortBreakDurationSeconds: Binding<Int>,
          longBreakDurationSeconds: Binding<Int>,
          launchAtLoginEnabled: Binding<Bool>,
+         pauseForMeetingAppsEnabled: Binding<Bool>,
          isPaused: @escaping () -> Bool,
+         isPausedForMeeting: @escaping () -> Bool,
          timeUntilBreak: @escaping () -> String,
          onSettingsChanged: @escaping () -> Void,
          onPauseResumeToggled: @escaping () -> Void,
@@ -553,7 +754,9 @@ struct SettingsView: View {
         self._shortBreakDurationSeconds = shortBreakDurationSeconds
         self._longBreakDurationSeconds = longBreakDurationSeconds
         self._launchAtLoginEnabled = launchAtLoginEnabled
+        self._pauseForMeetingAppsEnabled = pauseForMeetingAppsEnabled
         self.isPaused = isPaused
+        self.isPausedForMeeting = isPausedForMeeting
         self.timeUntilBreak = timeUntilBreak
         self.onSettingsChanged = onSettingsChanged
         self.onPauseResumeToggled = onPauseResumeToggled
@@ -636,6 +839,11 @@ struct SettingsView: View {
                 }
                 .padding(.bottom, 10)
 
+            // Meeting App Pause Setting (Adding missing Toggle)
+            Toggle("Pause for Meeting Apps", isOn: $pauseForMeetingAppsEnabled)
+                // No onChange needed here as AppDelegate reads @AppStorage directly
+                .padding(.bottom, 10)
+
             Divider()
 
             // Controls (Pause/Resume, Quit)
@@ -644,6 +852,7 @@ struct SettingsView: View {
                     onPauseResumeToggled()
                 }
                 .controlSize(.regular)
+                .disabled(isPaused() && isPausedForMeeting()) // Added missing disabled modifier
                 
                 Spacer()
                 
