@@ -103,6 +103,116 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastCPUTime: (user: UInt64, system: UInt64)?
     private var lastCPUCheckTime: Date?
     
+    // MARK: - Meeting Detection Protocol and Types
+    protocol MeetingDetector {
+        func isInMeeting() -> Bool
+        var name: String { get }
+    }
+
+    // MARK: - Zoom Meeting Detector
+    class ZoomMeetingDetector: MeetingDetector {
+        var name: String { "Zoom" }
+        
+        func isInMeeting() -> Bool {
+            ProcessInfo.processInfo.processIdentifier != 0 &&
+                NSRunningApplication.runningApplications(withBundleIdentifier: "us.zoom.CptHost").count > 0
+        }
+    }
+
+    // MARK: - Webex Meeting Detector
+    class WebexMeetingDetector: MeetingDetector {
+        var name: String { "Webex" }
+        
+        func isInMeeting() -> Bool {
+            NSWorkspace.shared.runningApplications.contains { app in
+                if let executableName = app.executableURL?.lastPathComponent {
+                    return executableName.lowercased() == "washost"
+                }
+                return false
+            }
+        }
+    }
+
+    // MARK: - Teams Meeting Detector
+    class TeamsMeetingDetector: MeetingDetector {
+        var name: String { "Teams" }
+        private var cpuHistory: [Double] = []
+        private let cpuHistoryMaxCount = 5
+        private var lastCPUTime: (user: UInt64, system: UInt64)?
+        private var lastCPUCheckTime: Date?
+        
+        func isInMeeting() -> Bool {
+            // First check if Teams is running
+            guard let teamsApp = NSWorkspace.shared.runningApplications.first(where: { $0.executableURL?.lastPathComponent == "MSTeams" }) else {
+                cpuHistory.removeAll()
+                lastCPUTime = nil
+                lastCPUCheckTime = nil
+                return false
+            }
+            
+            // Get CPU usage
+            let pid = teamsApp.processIdentifier
+            var info = proc_taskinfo()
+            let size = MemoryLayout<proc_taskinfo>.size
+            let result = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, Int32(size))
+            
+            if result <= 0 {
+                print("[Meeting Check] Error getting Teams process info: \(result)")
+                return false
+            }
+            
+            let now = Date()
+            let currentCPUTime = (user: info.pti_total_user, system: info.pti_total_system)
+            
+            // Calculate CPU usage percentage
+            var cpuUsage: Double = 0.0
+            if let lastTime = lastCPUTime, let lastCheck = lastCPUCheckTime {
+                let timeDiff = now.timeIntervalSince(lastCheck)
+                let userDiff = Double(currentCPUTime.user - lastTime.user)
+                let systemDiff = Double(currentCPUTime.system - lastTime.system)
+                
+                cpuUsage = ((userDiff + systemDiff) / (timeDiff * 10_000_000.0)) * 100.0
+                
+                cpuHistory.append(cpuUsage)
+                if cpuHistory.count > cpuHistoryMaxCount {
+                    cpuHistory.removeFirst()
+                }
+            }
+            
+            lastCPUTime = currentCPUTime
+            lastCPUCheckTime = now
+            
+            let averageCPU = cpuHistory.isEmpty ? 0.0 : cpuHistory.reduce(0.0, +) / Double(cpuHistory.count)
+            return averageCPU > 10.0
+        }
+    }
+
+    // MARK: - Meeting Monitor
+    class MeetingMonitor {
+        private let detectors: [MeetingDetector]
+        
+        init() {
+            self.detectors = [
+                ZoomMeetingDetector(),
+                WebexMeetingDetector(),
+                TeamsMeetingDetector()
+            ]
+        }
+        
+        func checkForActiveMeetings() -> (isActive: Bool, activeMeetingApp: String?) {
+            for detector in detectors {
+                if detector.isInMeeting() {
+                    print("[Meeting Check] \(detector.name) meeting detected")
+                    return (true, detector.name)
+                }
+            }
+            return (false, nil)
+        }
+    }
+
+    // Add MeetingMonitor property to AppDelegate
+    private var meetingMonitor: MeetingMonitor!
+    
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Use self.ownBundleID to resolve scope
         print("App launched. Own bundle ID: \(self.ownBundleID)") 
@@ -167,6 +277,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Start periodic meeting check timer
         startMeetingCheckTimer()
+        
+        // Initialize meeting monitor
+        meetingMonitor = MeetingMonitor()
     }
     
     @objc func togglePopover() {
@@ -710,74 +823,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         
-        // Check for Zoom meetings (CptHost process)
-        let zoomMeetingActive = ProcessInfo.processInfo.processIdentifier != 0 &&
-            NSRunningApplication.runningApplications(withBundleIdentifier: "us.zoom.CptHost").count > 0
-            
-        // Check for Teams meetings
-        let teamsMeetingActive = {
-            // First check if Teams is running
-            guard let teamsApp = NSWorkspace.shared.runningApplications.first(where: { $0.executableURL?.lastPathComponent == "MSTeams" }) else {
-                teamsCPUHistory.removeAll()
-                lastCPUTime = nil
-                lastCPUCheckTime = nil
-                return false
-            }
-            
-            // Get CPU usage
-            let pid = teamsApp.processIdentifier
-            var info = proc_taskinfo()
-            let size = MemoryLayout<proc_taskinfo>.size
-            let result = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, Int32(size))
-            
-            if result <= 0 {
-                print("Error getting Teams process info: \(result)")
-                return false
-            }
-            
-            let now = Date()
-            let currentCPUTime = (user: info.pti_total_user, system: info.pti_total_system)
-            
-            // Calculate CPU usage percentage
-            var cpuUsage: Double = 0.0
-            if let lastTime = lastCPUTime, let lastCheck = lastCPUCheckTime {
-                let timeDiff = now.timeIntervalSince(lastCheck)
-                let userDiff = Double(currentCPUTime.user - lastTime.user)
-                let systemDiff = Double(currentCPUTime.system - lastTime.system)
-                
-                // Calculate percentage based on time difference
-                cpuUsage = ((userDiff + systemDiff) / (timeDiff * 10_000_000.0)) * 100.0
-                
-                // Update CPU history
-                teamsCPUHistory.append(cpuUsage)
-                if teamsCPUHistory.count > cpuHistoryMaxCount {
-                    teamsCPUHistory.removeFirst()
-                }
-            }
-            
-            // Store current values for next check
-            lastCPUTime = currentCPUTime
-            lastCPUCheckTime = now
-            
-            // Calculate average CPU usage
-            let averageCPU = teamsCPUHistory.isEmpty ? 0.0 : teamsCPUHistory.reduce(0.0, +) / Double(teamsCPUHistory.count)
-            
-            // Consider meeting active if average CPU usage is above 10%
-            return averageCPU > 10.0
-        }()
+        let meetingStatus = meetingMonitor.checkForActiveMeetings()
         
-        // Meeting is active if either Zoom or Teams is in a meeting
-        let meetingActive = zoomMeetingActive || teamsMeetingActive
+        // Log overall meeting state
+        print("[Meeting Check] Meeting Status: \(meetingStatus.activeMeetingApp ?? "None")")
         
-        if meetingActive && !isPaused {
-            if zoomMeetingActive {
-                print("Zoom meeting detected (CptHost process found). Pausing timer.")
-            } else {
-                print("Teams meeting detected (high CPU usage). Pausing timer.")
-            }
+        if meetingStatus.isActive && !isPaused {
+            print("[Meeting Check] \(meetingStatus.activeMeetingApp ?? "Unknown") meeting detected. Pausing timer.")
             pauseTimer(isMeetingPause: true)
-        } else if !meetingActive && isPaused && pausedForMeetingApp {
-            print("No active meetings detected. Resuming timer.")
+        } else if !meetingStatus.isActive && isPaused && pausedForMeetingApp {
+            print("[Meeting Check] No active meetings detected. Resuming timer.")
             resumeTimer()
         }
     }
