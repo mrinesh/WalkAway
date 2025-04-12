@@ -49,12 +49,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var meetingCheckTimer: Timer? // Added: Timer to check for active meetings
     
     // Settings (persisted with UserDefaults)
-    @AppStorage("breakFrequencyMinutes") var breakFrequencyMinutes: Int = 20
-    @AppStorage("shortBreakDurationSeconds") var shortBreakDurationSeconds: Int = 20 // Renamed
-    @AppStorage("longBreakDurationSeconds") var longBreakDurationSeconds: Int = 60  // Added
-    @AppStorage("breakCycleCount") var breakCycleCount: Int = 0 // Added break counter
+    @AppStorage("breakFrequencyMinutes") var breakFrequencyMinutes: Int = 30
+    @AppStorage("shortBreakDurationSeconds") var shortBreakDurationSeconds: Int = 30
+    @AppStorage("longBreakDurationSeconds") var longBreakDurationSeconds: Int = 300 // Changed to 5 minutes (300 seconds)
+    @AppStorage("breakCycleCount") var breakCycleCount: Int = 0
     @AppStorage("launchAtLoginEnabled") var launchAtLoginEnabled: Bool = false // Added for launch setting
     @AppStorage("pauseForMeetingAppsEnabled") var pauseForMeetingAppsEnabled: Bool = false // Added missing binding
+    @AppStorage("inactivityThresholdMinutes") var inactivityThresholdMinutes: Int = 10 // New setting
     
     // Constants
     let preBreakWarningDuration: TimeInterval = 30.0 // Duration of the warning popup
@@ -102,6 +103,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let cpuHistoryMaxCount = 5 // 5 samples at 2-second intervals = 10 seconds
     private var lastCPUTime: (user: UInt64, system: UInt64)?
     private var lastCPUCheckTime: Date?
+    
+    // Add inactivity tracking properties
+    private var lastActivityTime: Date = Date()
+    private var inactivityTimer: Timer?
+    private var globalEventMonitor: Any?
+    private var localEventMonitor: Any?
+    private var hasExceededInactivityThreshold: Bool = false
+    
+    private var inactivityThreshold: TimeInterval {
+        TimeInterval(inactivityThresholdMinutes * 60) // Convert minutes to seconds
+    }
     
     // MARK: - Meeting Detection Protocol and Types
     protocol MeetingDetector {
@@ -244,10 +256,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Create the SwiftUI view for settings, passing new bindings
         let settingsView = SettingsView(
             frequencyMinutes: $breakFrequencyMinutes,
-            shortBreakDurationSeconds: $shortBreakDurationSeconds, // Use renamed binding
-            longBreakDurationSeconds: $longBreakDurationSeconds, // Pass new binding
-            launchAtLoginEnabled: $launchAtLoginEnabled, // Pass launch setting binding
-            pauseForMeetingAppsEnabled: $pauseForMeetingAppsEnabled, // Pass meeting pause setting binding
+            shortBreakDurationSeconds: $shortBreakDurationSeconds,
+            longBreakDurationSeconds: $longBreakDurationSeconds,
+            launchAtLoginEnabled: $launchAtLoginEnabled,
+            pauseForMeetingAppsEnabled: $pauseForMeetingAppsEnabled,
+            inactivityThresholdMinutes: $inactivityThresholdMinutes,
             isPaused: { [weak self] in self?.isPaused ?? false },
             isPausedForMeeting: { [weak self] in self?.pausedForMeetingApp ?? false },
             timeUntilBreak: { [weak self] in self?.timeUntilBreakFormatted ?? "--:--" },
@@ -257,7 +270,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             onPauseResumeToggled: { [weak self] in
                 self?.togglePauseResume()
             },
-            onLaunchSettingChanged: { [weak self] in // Add callback for launch setting
+            onLaunchSettingChanged: { [weak self] in
                 self?.toggleLaunchAtLogin()
             }
         )
@@ -280,6 +293,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Initialize meeting monitor
         meetingMonitor = MeetingMonitor()
+        
+        // Set up activity monitors
+        setupActivityMonitors()
+        startInactivityTimer()
     }
     
     @objc func togglePopover() {
@@ -801,7 +818,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     // MARK: - Cleanup
     deinit {
-        NSWorkspace.shared.notificationCenter.removeObserver(self) // Remove observers
+        if let globalMonitor = globalEventMonitor {
+            NSEvent.removeMonitor(globalMonitor)
+        }
+        if let localMonitor = localEventMonitor {
+            NSEvent.removeMonitor(localMonitor)
+        }
+        inactivityTimer?.invalidate()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         invalidateAllTimers()
     }
 
@@ -836,6 +860,67 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             resumeTimer()
         }
     }
+
+    // Add activity monitoring methods
+    private func setupActivityMonitors() {
+        // Monitor global mouse movements
+        globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged]) { [weak self] _ in
+            self?.resetInactivityTimer()
+        }
+        
+        // Monitor local mouse clicks and keyboard events
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
+            self?.resetInactivityTimer()
+            return event
+        }
+    }
+    
+    private func startInactivityTimer() {
+        inactivityTimer?.invalidate()
+        inactivityTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.checkInactivity()
+        }
+        if let timer = inactivityTimer {
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+    
+    private func resetInactivityTimer() {
+        let currentTime = Date()
+        let timeSinceLastActivity = currentTime.timeIntervalSince(lastActivityTime)
+        
+        // If we've exceeded the threshold and now there's new activity, reset the break cycle
+        if hasExceededInactivityThreshold {
+            print("[Inactivity] Activity detected after \(Int(timeSinceLastActivity))s of inactivity. Resetting break cycle.")
+            handleInactivity()
+            hasExceededInactivityThreshold = false
+        }
+        
+        lastActivityTime = currentTime
+    }
+    
+    private func checkInactivity() {
+        let currentTime = Date()
+        let timeSinceLastActivity = currentTime.timeIntervalSince(lastActivityTime)
+        
+        if timeSinceLastActivity >= inactivityThreshold {
+            if !hasExceededInactivityThreshold {
+                print("[Inactivity] No activity detected for \(Int(timeSinceLastActivity))s.")
+                hasExceededInactivityThreshold = true
+            }
+        }
+    }
+    
+    private func handleInactivity() {
+        // Only reset if we're not currently in a break
+        guard !isBreakActive else { return }
+        
+        // Reset break cycle count to start fresh
+        breakCycleCount = 0
+        
+        // Reset and restart the break timer
+        restartBreakTimer()
+    }
 }
 
 // MARK: - Settings View
@@ -846,6 +931,7 @@ struct SettingsView: View {
     @Binding var longBreakDurationSeconds: Int
     @Binding var launchAtLoginEnabled: Bool
     @Binding var pauseForMeetingAppsEnabled: Bool
+    @Binding var inactivityThresholdMinutes: Int
     
     var isPaused: () -> Bool
     var isPausedForMeeting: () -> Bool
@@ -861,6 +947,9 @@ struct SettingsView: View {
     // State for the frequency slider
     @State private var frequencyValue: Double
     
+    // Add state for inactivity slider
+    @State private var inactivityValue: Double
+    
     private let timerUpdatePublisher = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
     
     // Initializer to set up the frequency slider state and accept new parameters
@@ -869,6 +958,7 @@ struct SettingsView: View {
          longBreakDurationSeconds: Binding<Int>,
          launchAtLoginEnabled: Binding<Bool>,
          pauseForMeetingAppsEnabled: Binding<Bool>,
+         inactivityThresholdMinutes: Binding<Int>,
          isPaused: @escaping () -> Bool,
          isPausedForMeeting: @escaping () -> Bool,
          timeUntilBreak: @escaping () -> String,
@@ -881,6 +971,7 @@ struct SettingsView: View {
         self._longBreakDurationSeconds = longBreakDurationSeconds
         self._launchAtLoginEnabled = launchAtLoginEnabled
         self._pauseForMeetingAppsEnabled = pauseForMeetingAppsEnabled
+        self._inactivityThresholdMinutes = inactivityThresholdMinutes
         self.isPaused = isPaused
         self.isPausedForMeeting = isPausedForMeeting
         self.timeUntilBreak = timeUntilBreak
@@ -888,8 +979,9 @@ struct SettingsView: View {
         self.onPauseResumeToggled = onPauseResumeToggled
         self.onLaunchSettingChanged = onLaunchSettingChanged
         
-        // Initialize slider state from the binding
+        // Initialize slider states
         self._frequencyValue = State(initialValue: Double(frequencyMinutes.wrappedValue))
+        self._inactivityValue = State(initialValue: Double(inactivityThresholdMinutes.wrappedValue))
     }
 
     var body: some View {
@@ -916,12 +1008,12 @@ struct SettingsView: View {
             
             // Frequency Setting using Slider
             VStack(alignment: .leading, spacing: 5) {
-                Text("Break Frequency: \(Int(frequencyValue)) minutes") // Display Int value
+                Text("Break Frequency: \(Int(frequencyValue)) minutes")
                     .font(.headline)
-                Slider(value: $frequencyValue, in: 1...120, step: 1) {
+                Slider(value: $frequencyValue, in: 30...120, step: 10) {
                     // Empty label
                 } minimumValueLabel: {
-                    Text("1m").font(.caption)
+                    Text("30m").font(.caption)
                 } maximumValueLabel: {
                     Text("120m").font(.caption)
                 }
@@ -937,6 +1029,37 @@ struct SettingsView: View {
                 .onAppear {
                    frequencyValue = Double(frequencyMinutes) 
                 }
+                Text("Break reminder every \(Int(frequencyValue)) minutes")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+            .padding(.bottom, 10)
+
+            // Replace Inactivity Threshold Stepper with Slider
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Reset after inactive for: \(Int(inactivityValue)) minutes")
+                    .font(.headline)
+                Slider(value: $inactivityValue, in: 5...60, step: 5) {
+                    // Empty label
+                } minimumValueLabel: {
+                    Text("5m").font(.caption)
+                } maximumValueLabel: {
+                    Text("60m").font(.caption)
+                }
+                .onChange(of: inactivityValue) { newValue in
+                    let newIntValue = Int(newValue)
+                    // Update binding only if the integer value actually changed
+                    if newIntValue != inactivityThresholdMinutes {
+                        inactivityThresholdMinutes = newIntValue
+                    }
+                }
+                // Ensure slider state reflects external changes
+                .onAppear {
+                    inactivityValue = Double(inactivityThresholdMinutes)
+                }
+                Text("Timer will reset after this period of inactivity")
+                    .font(.caption)
+                    .foregroundColor(.gray)
             }
             .padding(.bottom, 10)
 
@@ -946,11 +1069,11 @@ struct SettingsView: View {
                     .font(.headline)
                 
                 // Short Break Duration
-                Stepper("Short Break: \(shortBreakDurationSeconds) seconds", value: $shortBreakDurationSeconds, in: 5...300, step: 15)
+                Stepper("Short Break: \(shortBreakDurationSeconds) seconds", value: $shortBreakDurationSeconds, in: 30...180, step: 30)
                     .onChange(of: shortBreakDurationSeconds) { _ in onSettingsChanged() }
                 
                 // Long Break Duration (Displaying and stepping in minutes, storing in seconds)
-                Stepper("Long Break: \(longBreakDurationSeconds / 60) minutes", value: $longBreakDurationSeconds, in: 30...900, step: 60) // Step is 60 seconds (1 min)
+                Stepper("Long Break: \(longBreakDurationSeconds / 60) minutes", value: $longBreakDurationSeconds, in: 300...1800, step: 300) // 5-30 minutes in steps of 5
                     .onChange(of: longBreakDurationSeconds) { _ in onSettingsChanged() }
                 Text("(Every 3rd break)")
                     .font(.caption)
