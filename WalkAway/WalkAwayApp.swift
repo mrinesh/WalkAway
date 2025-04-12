@@ -9,6 +9,12 @@ import SwiftUI
 import AppKit
 import Combine
 import ServiceManagement // Import for Launch at Login
+import AVFoundation
+import CoreAudio
+import AVKit // Add AVKit for capture device access
+#if canImport(Darwin)
+import Darwin
+#endif
 
 @main
 struct WalkAwayApp: App {
@@ -90,6 +96,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     // Add a published property to update the UI with time remaining
     @objc dynamic var timeUntilBreakFormatted: String = "--:--"
+    
+    // Add properties for CPU tracking
+    private var teamsCPUHistory: [Double] = []
+    private let cpuHistoryMaxCount = 5 // 5 samples at 2-second intervals = 10 seconds
+    private var lastCPUTime: (user: UInt64, system: UInt64)?
+    private var lastCPUCheckTime: Date?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Use self.ownBundleID to resolve scope
@@ -698,17 +710,103 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         
-        // Check for CptHost process using Process Info
-        let meetingActive = ProcessInfo.processInfo.processIdentifier != 0 &&
+        print("\n--- Checking for Active Meetings ---")
+        
+        // Check for Zoom meetings (CptHost process)
+        let zoomMeetingActive = ProcessInfo.processInfo.processIdentifier != 0 &&
             NSRunningApplication.runningApplications(withBundleIdentifier: "us.zoom.CptHost").count > 0
+        print("Zoom meeting active: \(zoomMeetingActive)")
+            
+        // Check for Teams meetings
+        let teamsMeetingActive = {
+            print("\nChecking Teams status:")
+            
+            // First check if Teams is running
+            let runningTeams = NSWorkspace.shared.runningApplications.filter { app in
+                // Print all running apps for debugging
+                print("Checking app: \(app.localizedName ?? "unknown") (executable: \(app.executableURL?.lastPathComponent ?? "unknown"))")
+                
+                // Check both localizedName and executable name
+                let isTeams = app.localizedName == "Microsoft Teams" || 
+                             app.executableURL?.lastPathComponent == "MSTeams" ||
+                             app.executableURL?.lastPathComponent == "Microsoft Teams"
+                if isTeams {
+                    print("Found Teams process: Name='\(app.localizedName ?? "unknown")', Executable='\(app.executableURL?.lastPathComponent ?? "unknown")' (PID: \(app.processIdentifier))")
+                }
+                return isTeams
+            }
+            
+            guard let teamsApp = runningTeams.first else {
+                print("Teams is not running")
+                teamsCPUHistory.removeAll()
+                lastCPUTime = nil
+                lastCPUCheckTime = nil
+                return false
+            }
+            
+            // Get CPU usage
+            let pid = teamsApp.processIdentifier
+            var info = proc_taskinfo()
+            let size = MemoryLayout<proc_taskinfo>.size
+            let result = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, Int32(size))
+            
+            if result <= 0 {
+                print("Error getting Teams process info: \(result)")
+                return false
+            }
+            
+            let now = Date()
+            let currentCPUTime = (user: info.pti_total_user, system: info.pti_total_system)
+            
+            // Calculate CPU usage percentage
+            var cpuUsage: Double = 0.0
+            if let lastTime = lastCPUTime, let lastCheck = lastCPUCheckTime {
+                let timeDiff = now.timeIntervalSince(lastCheck)
+                let userDiff = Double(currentCPUTime.user - lastTime.user)
+                let systemDiff = Double(currentCPUTime.system - lastTime.system)
+                
+                // Calculate percentage based on time difference
+                cpuUsage = ((userDiff + systemDiff) / (timeDiff * 10_000_000.0)) * 100.0
+                print("Current Teams CPU Usage: \(String(format: "%.2f", cpuUsage))%")
+                
+                // Update CPU history
+                teamsCPUHistory.append(cpuUsage)
+                if teamsCPUHistory.count > cpuHistoryMaxCount {
+                    teamsCPUHistory.removeFirst()
+                }
+            }
+            
+            // Store current values for next check
+            lastCPUTime = currentCPUTime
+            lastCPUCheckTime = now
+            
+            // Calculate average CPU usage
+            let averageCPU = teamsCPUHistory.isEmpty ? 0.0 : teamsCPUHistory.reduce(0.0, +) / Double(teamsCPUHistory.count)
+            print("CPU History: [\(teamsCPUHistory.map { String(format: "%.2f", $0) }.joined(separator: ", "))]")
+            print("Average CPU Usage (last \(teamsCPUHistory.count * 2)s): \(String(format: "%.2f", averageCPU))%")
+            
+            // Consider meeting active if average CPU usage is above 10%
+            let isActive = averageCPU > 10.0
+            print("\nTeams meeting detection result: \(isActive ? "ACTIVE" : "NOT ACTIVE")")
+            return isActive
+        }()
+        
+        // Meeting is active if either Zoom or Teams is in a meeting
+        let meetingActive = zoomMeetingActive || teamsMeetingActive
         
         if meetingActive && !isPaused {
-            print("Zoom meeting detected (CptHost process found). Pausing timer.")
+            if zoomMeetingActive {
+                print("Zoom meeting detected (CptHost process found). Pausing timer.")
+            } else {
+                print("Teams meeting detected (high CPU usage). Pausing timer.")
+            }
             pauseTimer(isMeetingPause: true)
         } else if !meetingActive && isPaused && pausedForMeetingApp {
-            print("No Zoom meeting detected (CptHost process not found). Resuming timer.")
+            print("No active meetings detected. Resuming timer.")
             resumeTimer()
         }
+        
+        print("--- End Meeting Check ---\n")
     }
 }
 
@@ -1033,3 +1131,4 @@ struct VisualEffectView: NSViewRepresentable {
         nsView.blendingMode = blendingMode
     }
 }
+
