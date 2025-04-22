@@ -37,7 +37,7 @@ struct SettingsPlaceholderView: View {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     // Main app components
     var statusItem: NSStatusItem?
     var popover: NSPopover?
@@ -250,7 +250,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Set up popover with SwiftUI content
         popover = NSPopover()
         // Adjust size slightly to accommodate new control if necessary
-        popover?.contentSize = NSSize(width: 300, height: 410) 
+        popover?.contentSize = NSSize(width: 300, height: 510) 
         popover?.behavior = .applicationDefined
         
         // Create the SwiftUI view for settings, passing new bindings
@@ -611,11 +611,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func togglePauseResume() {
+        print("[Debug] togglePauseResume called, current isPaused: \(isPaused)")
         if isPaused {
             resumeTimer()
         } else {
             pauseTimer()
         }
+        // Force UI refresh
+        self.objectWillChange.send()
     }
 
     // Helper to show temporary notifications (Fix for Error 1)
