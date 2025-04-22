@@ -56,7 +56,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @AppStorage("launchAtLoginEnabled") var launchAtLoginEnabled: Bool = false // Added for launch setting
     @AppStorage("pauseForMeetingAppsEnabled") var pauseForMeetingAppsEnabled: Bool = false // Added missing binding
     @AppStorage("inactivityThresholdMinutes") var inactivityThresholdMinutes: Int = 10 // New setting
-    @AppStorage("isFocusModeEnabled") var isFocusModeEnabled: Bool = false
     
     // Constants
     let preBreakWarningDuration: TimeInterval = 30.0 // Duration of the warning popup
@@ -320,27 +319,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         isPreBreakWarningActive = false
         remainingPreBreakTime = 0
         
-        // Check for focus mode (121 minutes)
-        if breakFrequencyMinutes == 121 {
-            isFocusModeEnabled = true
-            pauseTimer()
-            showPauseNotification(message: "Focus Mode Enabled")
-            return
-        }
-        
-        isFocusModeEnabled = false
         let fullBreakInterval = TimeInterval(breakFrequencyMinutes * 60)
         let initialTimerInterval = max(0, fullBreakInterval - preBreakWarningDuration)
-        remainingTimeUntilBreak = fullBreakInterval
+        remainingTimeUntilBreak = fullBreakInterval // Store the full duration for pause/resume
         
         print("Starting timer. Full interval: \(fullBreakInterval)s, Initial interval: \(initialTimerInterval)s")
         
         timerStartTime = Date()
         
         if initialTimerInterval <= 0 {
+            // If frequency is <= 30s, trigger warning immediately
             print("Frequency <= warning duration, triggering warning immediately.")
             triggerPreBreakWarning()
         } else {
+            // Start the main timer until the warning period
             timer = Timer(timeInterval: initialTimerInterval, repeats: false) { [weak self] _ in
                 self?.triggerPreBreakWarning()
             }
@@ -516,14 +508,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func updateTimeDisplay() {
-        if isBreakActive { return }
-        
-        if isFocusModeEnabled {
-            timeUntilBreakFormatted = "Focus Mode"
-            return
-        }
+        if isBreakActive { return } // No update needed during break overlay itself
         
         if isPaused {
+            // Show the correct stored remaining time when paused
             let remainingToDisplay = remainingPreBreakTime > 0 ? remainingPreBreakTime : remainingTimeUntilBreak
             timeUntilBreakFormatted = formatTime(seconds: Int(remainingToDisplay))
             return
@@ -535,15 +523,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if isPreBreakWarningActive {
                 currentRemaining = max(0, preBreakWarningDuration - elapsed)
             } else {
+                // Calculate remaining of the *full* interval until break
                 let fullBreakInterval = TimeInterval(breakFrequencyMinutes * 60)
                 currentRemaining = max(0, fullBreakInterval - elapsed)
             }
-        }
-        
+        } 
+        // Store this for pause calculation if needed (only if not in warning phase)
         if !isPreBreakWarningActive {
             remainingTimeUntilBreak = currentRemaining
         }
-        
+
         timeUntilBreakFormatted = formatTime(seconds: Int(currentRemaining))
     }
     
@@ -1019,28 +1008,28 @@ struct SettingsView: View {
             
             // Frequency Setting using Slider
             VStack(alignment: .leading, spacing: 5) {
-                Text(frequencyValue == 121 ? "Focus Mode Enabled" : "Break Frequency: \(Int(frequencyValue)) minutes")
+                Text("Break Frequency: \(Int(frequencyValue)) minutes")
                     .font(.headline)
-                Slider(value: $frequencyValue, in: 1...121, step: 1) {
+                Slider(value: $frequencyValue, in: 30...120, step: 10) {
                     // Empty label
                 } minimumValueLabel: {
-                    Text("1m").font(.caption)
+                    Text("30m").font(.caption)
                 } maximumValueLabel: {
-                    Text("Focus").font(.caption)
+                    Text("120m").font(.caption)
                 }
                 .onChange(of: frequencyValue) { newValue in
                     let newIntValue = Int(newValue)
+                    // Update binding only if the integer value actually changed
                     if newIntValue != frequencyMinutes {
                         frequencyMinutes = newIntValue
-                        onSettingsChanged()
+                        onSettingsChanged() 
                     }
                 }
+                // Ensure slider state reflects external changes if needed (e.g., from AppStorage defaults)
                 .onAppear {
-                   frequencyValue = Double(frequencyMinutes)
+                   frequencyValue = Double(frequencyMinutes) 
                 }
-                Text(frequencyValue == 121 ? 
-                     "Timer paused - Focus Mode" :
-                     "Break reminder every \(Int(frequencyValue)) minutes")
+                Text("Break reminder every \(Int(frequencyValue)) minutes")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
