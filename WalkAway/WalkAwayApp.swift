@@ -41,11 +41,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     // Main app components
     var statusItem: NSStatusItem?
     var popover: NSPopover?
-    var timer: Timer? // Main timer until pre-break warning
-    var finalCountdownTimer: Timer? // Timer for the 30s warning period
     var overlayWindowControllers: [OverlayWindowController] = []
     var notificationWindowController: NotificationWindowController? // Controller for the notification popup
-    private var uiUpdateTimer: Timer?
+    private var tickTimer: Timer? // Drives the work timer once per second
+    private var breakCountdownTimer: Timer? // Counts down the break overlay
     private var meetingCheckTimer: Timer? // Added: Timer to check for active meetings
     
     // Settings (persisted with UserDefaults)
@@ -80,7 +79,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     // Current state
     var isBreakActive = false
     var remainingSeconds = 0 // Remaining seconds *during* a break
-    var isPreBreakWarningActive = false // Is the 30s warning active?
     var pausedForMeetingApp: Bool = false // Added missing property declaration
     
     // Motivational messages
@@ -108,15 +106,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var lastCPUTime: (user: UInt64, system: UInt64)?
     private var lastCPUCheckTime: Date?
     
-    // Add inactivity tracking properties
-    private var lastActivityTime: Date = Date()
-    private var inactivityTimer: Timer?
-    private var globalEventMonitor: Any?
-    private var localEventMonitor: Any?
-    private var hasExceededInactivityThreshold: Bool = false
+    // Work timer state (see BreakScheduler)
+    private lazy var scheduler = BreakScheduler(configuration: currentSchedulerConfiguration())
+    private var lastTickUptime = ProcessInfo.processInfo.systemUptime
     
-    private var inactivityThreshold: TimeInterval {
-        TimeInterval(inactivityThresholdMinutes * 60) // Convert minutes to seconds
+    private enum ScreenOffReason {
+        case screenSaver, screenLocked, displaysAsleep, systemAsleep, sessionInactive
+    }
+    // Saver and lock often overlap, so the screen only counts as back once every reason has cleared
+    private var screenOffReasons: Set<ScreenOffReason> = []
+    
+    private func currentSchedulerConfiguration() -> BreakScheduler.Configuration {
+        BreakScheduler.Configuration(
+            workInterval: TimeInterval(effectiveBreakFrequencyMinutes * 60),
+            awayThreshold: TimeInterval(inactivityThresholdMinutes * 60),
+            warningLead: preBreakWarningDuration
+        )
     }
     
     // MARK: - Meeting Detection Protocol and Types
@@ -286,21 +291,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // Sync launch at login status on startup
         syncLaunchAtLoginState()
         
-        // Register for sleep/wake notifications
-        setupSleepWakeNotifications()
+        setupScreenStateObservers()
         
-        // Start the break timer
-        startBreakTimer()
-        
-        // Start periodic meeting check timer
+        meetingMonitor = MeetingMonitor()
         startMeetingCheckTimer()
         
-        // Initialize meeting monitor
-        meetingMonitor = MeetingMonitor()
-        
-        // Set up activity monitors
-        setupActivityMonitors()
-        startInactivityTimer()
+        startTickTimer()
     }
     
     @objc func togglePopover() {
@@ -317,372 +313,246 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
     
-    func startBreakTimer() {
-        invalidateAllTimers()
-        isPaused = false
-        isPreBreakWarningActive = false
-        remainingPreBreakTime = 0
-        
-        let fullBreakInterval = TimeInterval(effectiveBreakFrequencyMinutes * 60)
-        let initialTimerInterval = max(0, fullBreakInterval - preBreakWarningDuration)
-        remainingTimeUntilBreak = fullBreakInterval // Store the full duration for pause/resume
-        
-        print("Starting timer. Full interval: \(fullBreakInterval)s, Initial interval: \(initialTimerInterval)s")
-        
-        timerStartTime = Date()
-        
-        if initialTimerInterval <= 0 {
-            // If frequency is <= 30s, trigger warning immediately
-            print("Frequency <= warning duration, triggering warning immediately.")
-            triggerPreBreakWarning()
-        } else {
-            // Start the main timer until the warning period
-            timer = Timer(timeInterval: initialTimerInterval, repeats: false) { [weak self] _ in
-                self?.triggerPreBreakWarning()
-            }
-            RunLoop.main.add(timer!, forMode: .common)
+    // MARK: - Work Timer
+
+    private func startTickTimer() {
+        lastTickUptime = ProcessInfo.processInfo.systemUptime
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.tick()
         }
-        
-        startUIUpdateTimer()
+        RunLoop.main.add(timer, forMode: .common)
+        tickTimer = timer
+        updateTimeDisplay()
     }
-    
+
+    private func tick() {
+        let uptime = ProcessInfo.processInfo.systemUptime
+        let elapsed = uptime - lastTickUptime
+        lastTickUptime = uptime
+
+        // Re-read settings every tick so slider changes apply immediately
+        scheduler.configuration = currentSchedulerConfiguration()
+        let inputs = BreakScheduler.Inputs(
+            idleSeconds: SystemActivity.secondsSinceLastInput(),
+            isVideoPlaying: SystemActivity.isDisplaySleepPrevented(),
+            isInMeeting: pausedForMeetingApp,
+            isManuallyPaused: isPaused && !pausedForMeetingApp
+        )
+        handle(scheduler.tick(elapsed: elapsed, now: Date().timeIntervalSinceReferenceDate, inputs: inputs))
+        updateTimeDisplay()
+    }
+
+    private func handle(_ events: [BreakScheduler.Event]) {
+        for event in events {
+            switch event {
+            case .warning:
+                showCustomNotification()
+            case .breakDue:
+                triggerBreak()
+            case .wentAway:
+                print("[Activity] User is away. Break cycle reset.")
+                breakCycleCount = 0
+                notificationWindowController?.closeNotificationImmediately()
+                notificationWindowController = nil
+                if isBreakActive {
+                    closeBreakOverlay()
+                }
+            case .returned:
+                print("[Activity] User is back. Timer resumed.")
+            }
+        }
+    }
+
     func restartBreakTimer() {
         guard !isBreakActive else { return }
         print("Restarting timer with new settings")
-        startBreakTimer()
-    }
-    
-    func triggerPreBreakWarning() {
-        guard !isPaused, !isBreakActive else { return }
-        
-        timer?.invalidate() // Stop the main timer
-        timer = nil
-        
-        isPreBreakWarningActive = true
-        remainingTimeUntilBreak = preBreakWarningDuration // Update remaining time for display
-        timerStartTime = Date() // Reset start time for the final countdown
-        
-        print("Triggering pre-break warning (\(preBreakWarningDuration)s remaining)")
-        
-        // Show Custom Notification instead of Alert
-        showCustomNotification()
-        
-        // Start the final 30-second countdown timer
-        finalCountdownTimer = Timer(timeInterval: preBreakWarningDuration, repeats: false) { [weak self] _ in
-            self?.triggerBreak()
-        }
-        RunLoop.main.add(finalCountdownTimer!, forMode: .common)
-        
-        // Ensure UI updates during warning
+        scheduler.configuration = currentSchedulerConfiguration()
+        scheduler.resetCycle()
         updateTimeDisplay()
     }
-    
-    // Replaces showPreBreakAlert
-    func showCustomNotification() {
-        // Close previous notification if any
-        notificationWindowController?.closeNotificationImmediately()
 
-        // Create and show new notification
-        let notificationMessage = "Break starting in \(Int(preBreakWarningDuration))s..."
-        notificationWindowController = NotificationWindowController(message: notificationMessage)
+    func showCustomNotification() {
+        notificationWindowController?.closeNotificationImmediately()
+        let secondsLeft = Int(scheduler.remaining.rounded(.up))
+        notificationWindowController = NotificationWindowController(message: "Break starting in \(secondsLeft)s...")
         notificationWindowController?.showNotification()
     }
-    
+
+    // MARK: - Break Overlay
+
     func triggerBreak() {
         guard !isBreakActive else { return }
-        
-        // Close notification window if it's still open
+
         notificationWindowController?.closeNotificationImmediately()
         notificationWindowController = nil
-
-        finalCountdownTimer?.invalidate()
-        finalCountdownTimer = nil
-        isPreBreakWarningActive = false
         isBreakActive = true
-        
+
         // Pause any playing media so it doesn't keep running in the background during the break
         MediaController.shared.pauseIfPlaying()
-        
-        // Determine break duration and skippable status
+
+        // Every 3rd break is a long, non-skippable one
         breakCycleCount += 1
         let isLongBreak = (breakCycleCount % 3 == 0)
-        if isLongBreak {
-            remainingSeconds = longBreakDurationSeconds
-            print("Triggering LONG (non-skippable) break (\(remainingSeconds)s)")
-        } else {
-            remainingSeconds = shortBreakDurationSeconds
-            print("Triggering SHORT (skippable) break (\(remainingSeconds)s)")
-        }
+        remainingSeconds = isLongBreak ? longBreakDurationSeconds : shortBreakDurationSeconds
+        print("Triggering \(isLongBreak ? "LONG (non-skippable)" : "SHORT (skippable)") break (\(remainingSeconds)s)")
         if breakCycleCount >= 99 { breakCycleCount = 0 }
-        
+
         currentMessage = motivationalMessages.randomElement() ?? "Take a break!"
-        
-        // Create and show overlay windows, passing skippable status
+
         overlayWindowControllers.forEach { $0.close() }
         overlayWindowControllers = []
         for screen in NSScreen.screens {
-            let overlayController = OverlayWindowController(screen: screen, isSkippable: !isLongBreak) // Pass false if it's a long break
+            let overlayController = OverlayWindowController(screen: screen, isSkippable: !isLongBreak)
             overlayController.currentMessage = currentMessage
-            overlayController.skipCallback = { [weak self] in 
-                // This callback should only be possible if it IS skippable
-                self?.finishBreak(skipped: true) 
+            overlayController.skipCallback = { [weak self] in
+                self?.finishBreak(skipped: true)
             }
             overlayController.showWindow(nil)
             overlayWindowControllers.append(overlayController)
         }
-        
+
         startCountdownTimer()
     }
-    
-    // This timer runs DURING the break overlay
+
     func startCountdownTimer() {
-        // Invalidate pre-break timers just in case
-        timer?.invalidate()
-        finalCountdownTimer?.invalidate()
-        
+        breakCountdownTimer?.invalidate()
         let countdownTimer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            
+
             self.remainingSeconds -= 1
             let formattedTime = self.formatTime(seconds: self.remainingSeconds)
-            
-            // Update time display on all overlay windows
             for overlayController in self.overlayWindowControllers {
                 overlayController.updateTimeDisplay(formattedTime)
             }
-            
+
             if self.remainingSeconds <= 0 {
                 self.finishBreak(skipped: false)
             }
         }
         RunLoop.main.add(countdownTimer, forMode: .common)
-        // Assign to main timer variable temporarily? No, need a separate one? 
-        // Let's keep it simple: the break countdown doesn't use the main 'timer' or 'finalCountdownTimer'
-        // We need to ensure finishBreak invalidates *this* timer if skipped.
-        // Let's assign it to 'timer' as it represents the *active* timer during the break.
-        self.timer = countdownTimer
+        breakCountdownTimer = countdownTimer
     }
-    
-    func finishBreak(skipped: Bool) {
-        invalidateAllTimers()
-        isBreakActive = false
-        isPreBreakWarningActive = false
-        remainingPreBreakTime = 0
-        
-        // Close notification window if it's somehow still open
-        notificationWindowController?.closeNotificationImmediately()
-        notificationWindowController = nil
 
-        overlayWindowControllers.forEach { $0.close() }
-        overlayWindowControllers = []
-        
-        // Play sound
+    func finishBreak(skipped: Bool) {
+        closeBreakOverlay()
+
         if let soundURL = Bundle.main.url(forResource: "welcome", withExtension: "mp3") {
             NSSound(contentsOf: soundURL, byReference: false)?.play()
         } else {
             print("Warning: Custom sound file 'welcome.mp3' not found in bundle. Playing fallback.")
             NSSound(named: "Bottle")?.play()
         }
-        
-        startBreakTimer() // Restart the whole cycle
+
+        scheduler.finishBreak()
+        updateTimeDisplay()
     }
-    
-    // Helper to invalidate all timers
-    func invalidateAllTimers() {
-        timer?.invalidate()
-        finalCountdownTimer?.invalidate()
-        uiUpdateTimer?.invalidate()
-        meetingCheckTimer?.invalidate() // Added: Invalidate meeting check timer
-        timer = nil
-        finalCountdownTimer = nil
-        uiUpdateTimer = nil
-        meetingCheckTimer = nil
+
+    private func closeBreakOverlay() {
+        breakCountdownTimer?.invalidate()
+        breakCountdownTimer = nil
+        isBreakActive = false
+        notificationWindowController?.closeNotificationImmediately()
+        notificationWindowController = nil
+        overlayWindowControllers.forEach { $0.close() }
+        overlayWindowControllers = []
     }
-    
+
     func formatTime(seconds: Int) -> String {
         let minutes = seconds / 60
         let remainingSeconds = seconds % 60
         return String(format: "%02d:%02d", minutes, remainingSeconds)
     }
-    
-    func startUIUpdateTimer() {
-        uiUpdateTimer?.invalidate()
-        uiUpdateTimer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.updateTimeDisplay()
-        }
-        RunLoop.main.add(uiUpdateTimer!, forMode: .common)
-        updateTimeDisplay()
-    }
-    
-    func updateTimeDisplay() {
-        if isBreakActive { return } // No update needed during break overlay itself
-        
-        if isPaused {
-            // Show the correct stored remaining time when paused
-            let remainingToDisplay = remainingPreBreakTime > 0 ? remainingPreBreakTime : remainingTimeUntilBreak
-            timeUntilBreakFormatted = formatTime(seconds: Int(remainingToDisplay))
-            return
-        }
-        
-        var currentRemaining: TimeInterval = 0
-        if let startTime = timerStartTime {
-            let elapsed = Date().timeIntervalSince(startTime)
-            if isPreBreakWarningActive {
-                currentRemaining = max(0, preBreakWarningDuration - elapsed)
-            } else {
-                // Calculate remaining of the *full* interval until break
-                let fullBreakInterval = TimeInterval(effectiveBreakFrequencyMinutes * 60)
-                currentRemaining = max(0, fullBreakInterval - elapsed)
-            }
-        } 
-        // Store this for pause calculation if needed (only if not in warning phase)
-        if !isPreBreakWarningActive {
-            remainingTimeUntilBreak = currentRemaining
-        }
 
-        timeUntilBreakFormatted = formatTime(seconds: Int(currentRemaining))
-    }
-    
-    // Modified pauseTimer definition to accept meeting pause state
-    func pauseTimer(isMeetingPause: Bool = false) { 
-        guard !isPaused && !isBreakActive else { return }
-        
-        let now = Date()
-        if let startTime = timerStartTime {
-            let elapsed = now.timeIntervalSince(startTime)
-            if isPreBreakWarningActive {
-                remainingPreBreakTime = max(0, preBreakWarningDuration - elapsed)
-                finalCountdownTimer?.invalidate()
-                finalCountdownTimer = nil
-                print("Timer paused during pre-break warning with \(formatTime(seconds: Int(remainingPreBreakTime))) remaining")
-            } else {
-                let fullBreakInterval = TimeInterval(effectiveBreakFrequencyMinutes * 60)
-                remainingTimeUntilBreak = max(0, fullBreakInterval - elapsed)
-                timer?.invalidate()
-                timer = nil
-                 print("Timer paused with \(formatTime(seconds: Int(remainingTimeUntilBreak))) remaining until break")
-            }
+    func updateTimeDisplay() {
+        if isBreakActive { return }
+        if scheduler.phase == .away && !isPaused {
+            timeUntilBreakFormatted = "Away"
+        } else {
+            timeUntilBreakFormatted = formatTime(seconds: Int(scheduler.remaining.rounded(.up)))
         }
-        
-        timerStartTime = nil
+    }
+
+    // MARK: - Pause / Resume
+
+    func pauseTimer(isMeetingPause: Bool = false) {
+        guard !isPaused && !isBreakActive else { return }
         isPaused = true
-        pausedForMeetingApp = isMeetingPause // Set the flag if it's a meeting pause
-        
+        pausedForMeetingApp = isMeetingPause
         if isMeetingPause {
             showPauseNotification(message: "Timer paused for Meeting App")
         }
-        
         updateTimeDisplay()
     }
-    
+
     func resumeTimer() {
         guard isPaused && !isBreakActive else { return }
-        
-        // Set new start time based on the remaining time
-        let now = Date()
-        
-        if remainingPreBreakTime > 0 {
-            // Resuming final countdown
-            print("Resuming pre-break warning timer with \(formatTime(seconds: Int(remainingPreBreakTime))) remaining")
-            finalCountdownTimer = Timer(timeInterval: remainingPreBreakTime, repeats: false) { [weak self] _ in
-                self?.triggerBreak()
-            }
-            RunLoop.main.add(finalCountdownTimer!, forMode: .common)
-            isPreBreakWarningActive = true // Ensure flag is set
-            timerStartTime = now.addingTimeInterval(-1 * (preBreakWarningDuration - remainingPreBreakTime))
-            remainingPreBreakTime = 0 // Clear stored value
-        } else {
-            // Resuming main countdown with exact remaining time
-            let fullBreakInterval = TimeInterval(effectiveBreakFrequencyMinutes * 60)
-            let intervalUntilWarning = max(0, remainingTimeUntilBreak - preBreakWarningDuration)
-            print("Resuming main timer with \(formatTime(seconds: Int(remainingTimeUntilBreak))) remaining until break (warning in \(formatTime(seconds: Int(intervalUntilWarning))))")
-            
-            // Calculate what time the timer would have started to have this much time remaining
-            timerStartTime = now.addingTimeInterval(-1 * (fullBreakInterval - remainingTimeUntilBreak))
-            
-            if intervalUntilWarning <= 0 {
-                // If remaining time is less than warning duration, trigger warning immediately
-                triggerPreBreakWarning()
-            } else {
-                timer = Timer(timeInterval: intervalUntilWarning, repeats: false) { [weak self] _ in
-                    self?.triggerPreBreakWarning()
-                }
-                RunLoop.main.add(timer!, forMode: .common)
-            }
-            isPreBreakWarningActive = false // Ensure flag is reset
-        }
-        
         isPaused = false
-        pausedForMeetingApp = false // Reset meeting pause flag
-        updateTimeDisplay() // Update display immediately
+        pausedForMeetingApp = false
+        updateTimeDisplay()
     }
-    
+
     func togglePauseResume() {
-        print("[Debug] togglePauseResume called, current isPaused: \(isPaused)")
         if isPaused {
             resumeTimer()
         } else {
             pauseTimer()
         }
-        // Force UI refresh
         self.objectWillChange.send()
     }
 
-    // Helper to show temporary notifications (Fix for Error 1)
     func showPauseNotification(message: String) {
         notificationWindowController?.closeNotificationImmediately()
         notificationWindowController = NotificationWindowController(message: message)
         notificationWindowController?.showNotification()
     }
 
-    // MARK: - Sleep/Wake Handling
-    func setupSleepWakeNotifications() {
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(systemWillSleep),
-            name: NSWorkspace.willSleepNotification, 
-            object: nil
-        )
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(systemDidWake),
-            name: NSWorkspace.didWakeNotification,
-            object: nil
-        )
-    }
+    // MARK: - Screen State (saver, lock, display sleep, system sleep, user switching)
 
-    @objc func systemWillSleep(_ notification: Notification) {
-        print("System will sleep. Pausing timers.")
-        // If a break is active, store remaining seconds
-        if isBreakActive, let currentTimer = self.timer, currentTimer.isValid {
-             // We don't have an easy way to get remaining time from a non-repeating timer like this.
-             // Simplest is to just mark it paused. On wake, we'll finish the break.
-             print("Sleeping during active break.")
-             invalidateAllTimers() // Stop the break countdown
-             isPaused = true // Mark as paused so wake logic knows
-        } else if !isPaused { 
-            // Pause timers only if not already paused manually
-            pauseTimer() 
+    private var screenObservers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
+
+    private func setupScreenStateObservers() {
+        let distributed = DistributedNotificationCenter.default()
+        let workspace = NSWorkspace.shared.notificationCenter
+        let observations: [(NotificationCenter, Notification.Name, ScreenOffReason, Bool)] = [
+            (distributed, Notification.Name("com.apple.screensaver.didstart"), .screenSaver, true),
+            (distributed, Notification.Name("com.apple.screensaver.didstop"), .screenSaver, false),
+            (distributed, Notification.Name("com.apple.screenIsLocked"), .screenLocked, true),
+            (distributed, Notification.Name("com.apple.screenIsUnlocked"), .screenLocked, false),
+            (workspace, NSWorkspace.screensDidSleepNotification, .displaysAsleep, true),
+            (workspace, NSWorkspace.screensDidWakeNotification, .displaysAsleep, false),
+            (workspace, NSWorkspace.willSleepNotification, .systemAsleep, true),
+            (workspace, NSWorkspace.didWakeNotification, .systemAsleep, false),
+            (workspace, NSWorkspace.sessionDidResignActiveNotification, .sessionInactive, true),
+            (workspace, NSWorkspace.sessionDidBecomeActiveNotification, .sessionInactive, false),
+        ]
+        for (center, name, reason, isOff) in observations {
+            let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.setScreenOff(isOff, reason: reason)
+            }
+            screenObservers.append((center, token))
         }
     }
 
-    @objc func systemDidWake(_ notification: Notification) {
-        print("System did wake.")
-        if isBreakActive && isPaused { // Woke up during an interrupted break
-             print("Woke during break. Finishing break and restarting cycle.")
-             finishBreak(skipped: true) // End the interrupted break
-             // startBreakTimer() is called by finishBreak
-        } else if isPaused { // Woke up during a normal paused state (main or pre-break)
-            print("Resuming timer after wake.")
-            resumeTimer()
+    private func setScreenOff(_ isOff: Bool, reason: ScreenOffReason) {
+        let now = Date().timeIntervalSinceReferenceDate
+        let wasOff = !screenOffReasons.isEmpty
+        if isOff {
+            screenOffReasons.insert(reason)
         } else {
-            // If not paused before sleep (shouldn't happen often, but maybe), ensure timers are running.
-            print("Woke, wasn't paused. Ensuring timers are running.")
-            // A simple restart might be safest if state is unexpected.
-            restartBreakTimer()
+            screenOffReasons.remove(reason)
         }
+        let isNowOff = !screenOffReasons.isEmpty
+
+        if isNowOff && !wasOff {
+            print("[Screen] Off (\(reason))")
+            scheduler.screenDidTurnOff(at: now)
+        } else if !isNowOff && wasOff {
+            print("[Screen] On")
+            handle(scheduler.screenDidTurnOn(at: now))
+        }
+        updateTimeDisplay()
     }
-    
+
     // MARK: - Launch at Login
     func syncLaunchAtLoginState() {
         // Ensure the system state matches the stored preference on launch
@@ -720,7 +590,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // Check specifically for Zoom activation
         if bundleID == "us.zoom.xos" {
             // Check if timer is actively running
-            if !isPaused && !isBreakActive && !isPreBreakWarningActive {
+            if !isPaused && !isBreakActive {
                 
                 // Get all windows
                 let options = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
@@ -828,18 +698,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     
     // MARK: - Cleanup
     deinit {
-        if let globalMonitor = globalEventMonitor {
-            NSEvent.removeMonitor(globalMonitor)
-        }
-        if let localMonitor = localEventMonitor {
-            NSEvent.removeMonitor(localMonitor)
-        }
-        inactivityTimer?.invalidate()
+        screenObservers.forEach { $0.center.removeObserver($0.token) }
         NSWorkspace.shared.notificationCenter.removeObserver(self)
-        invalidateAllTimers()
+        tickTimer?.invalidate()
+        breakCountdownTimer?.invalidate()
+        meetingCheckTimer?.invalidate()
     }
 
-    // Added: New function to start meeting check timer
     func startMeetingCheckTimer() {
         meetingCheckTimer?.invalidate()
         meetingCheckTimer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -849,19 +714,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             RunLoop.main.add(timer, forMode: .common)
         }
     }
-    
-    // Added: New function to check for active meetings
+
     func checkForActiveMeetings() {
         guard pauseForMeetingAppsEnabled,
               !isBreakActive else {
             return
         }
-        
+
         let meetingStatus = meetingMonitor.checkForActiveMeetings()
-        
-        // Log overall meeting state
-        print("[Meeting Check] Meeting Status: \(meetingStatus.activeMeetingApp ?? "None")")
-        
+
         if meetingStatus.isActive && !isPaused {
             print("[Meeting Check] \(meetingStatus.activeMeetingApp ?? "Unknown") meeting detected. Pausing timer.")
             pauseTimer(isMeetingPause: true)
@@ -869,67 +730,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             print("[Meeting Check] No active meetings detected. Resuming timer.")
             resumeTimer()
         }
-    }
-
-    // Add activity monitoring methods
-    private func setupActivityMonitors() {
-        // Monitor global mouse movements
-        globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged]) { [weak self] _ in
-            self?.resetInactivityTimer()
-        }
-        
-        // Monitor local mouse clicks and keyboard events
-        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
-            self?.resetInactivityTimer()
-            return event
-        }
-    }
-    
-    private func startInactivityTimer() {
-        inactivityTimer?.invalidate()
-        inactivityTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.checkInactivity()
-        }
-        if let timer = inactivityTimer {
-            RunLoop.main.add(timer, forMode: .common)
-        }
-    }
-    
-    private func resetInactivityTimer() {
-        let currentTime = Date()
-        let timeSinceLastActivity = currentTime.timeIntervalSince(lastActivityTime)
-        
-        // If we've exceeded the threshold and now there's new activity, reset the break cycle
-        if hasExceededInactivityThreshold {
-            print("[Inactivity] Activity detected after \(Int(timeSinceLastActivity))s of inactivity. Resetting break cycle.")
-            handleInactivity()
-            hasExceededInactivityThreshold = false
-        }
-        
-        lastActivityTime = currentTime
-    }
-    
-    private func checkInactivity() {
-        let currentTime = Date()
-        let timeSinceLastActivity = currentTime.timeIntervalSince(lastActivityTime)
-        
-        if timeSinceLastActivity >= inactivityThreshold {
-            if !hasExceededInactivityThreshold {
-                print("[Inactivity] No activity detected for \(Int(timeSinceLastActivity))s.")
-                hasExceededInactivityThreshold = true
-            }
-        }
-    }
-    
-    private func handleInactivity() {
-        // Only reset if we're not currently in a break
-        guard !isBreakActive else { return }
-        
-        // Reset break cycle count to start fresh
-        breakCycleCount = 0
-        
-        // Reset and restart the break timer
-        restartBreakTimer()
     }
 }
 

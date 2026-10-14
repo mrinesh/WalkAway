@@ -30,8 +30,9 @@ Long, unbroken stretches at a screen lead to eye strain, stiff shoulders, and sl
 ### Smart enough to stay out of your way
 - **Pauses for meetings.** Detects active **Zoom**, **Microsoft Teams**, and **Webex** calls, pauses the timer, and resumes automatically when the call ends.
 - **Pauses your media.** When a break starts, whatever is playing (a YouTube video in Safari, Music, Spotify, …) is paused, so it doesn't keep running behind the overlay. Media that's already paused stays paused.
-- **Resets after you've been away.** If you've been idle longer than your threshold, the cycle starts fresh when you come back, so you don't get a break the moment you sit down.
-- **Handles sleep and wake.** Timers pause when your Mac sleeps and pick up where they left off.
+- **Knows when you're away.** After a minute with no keyboard or mouse input, the countdown freezes, so a break never fires at an empty desk. Idle past your threshold and the cycle resets. It stays reset until you're back.
+- **Counts screen-off time as a break.** If the screen saver, lock screen, display sleep or Mac sleep lasts 10 seconds or more, the cycle starts fresh.
+- **Knows watching isn't idling.** Watching a video with no input still counts as screen time, so the timer keeps running.
 
 ### Comfortable to live with
 - Lives in the menu bar only: no Dock icon, no windows.
@@ -61,8 +62,20 @@ flowchart LR
     D --> A
     A -.->|meeting detected| P[Paused]
     P -.->|meeting ends| A
-    A -.->|idle past threshold,<br/>then activity| A
+    A -.->|idle past threshold, or<br/>screen off ≥ 10 s| W[Away<br/>timer reset]
+    W -.->|any input| A
 ```
+
+The countdown only runs while you're actually at your Mac:
+
+| Situation | Countdown |
+| --- | --- |
+| You're typing or using the mouse | Runs |
+| A video is playing, even without input | Runs |
+| No input for 60 seconds | Frozen |
+| No input past your inactivity threshold | Reset to the full interval, shown as **Away** until you're back |
+| Screen saver, lock, display or Mac sleep for 10 s or more | Reset, shown as **Away** |
+| A meeting is detected | Paused, never reset |
 
 ## Getting started
 
@@ -99,9 +112,16 @@ To quit, open the menu bar popover and click **Quit WalkAway** (or press **⌘Q*
 | File | Responsibility |
 | --- | --- |
 | [`WalkAwayApp.swift`](WalkAway/WalkAwayApp.swift) | App entry point and `AppDelegate`: break timers, pause/resume, meeting detection, inactivity tracking, sleep/wake, Launch at Login, the settings popover, and the heads-up toast. |
+| [`BreakScheduler.swift`](WalkAway/BreakScheduler.swift) | The work-timer state machine (working, on break, away). It holds no timers and reads no system state, so it's fully unit tested. |
+| [`SystemActivity.swift`](WalkAway/SystemActivity.swift) | Reads system idle time and whether a video is keeping the display awake. |
 | [`OverlayWindowController.swift`](WalkAway/OverlayWindowController.swift) | The full-screen break window, one per display, with its animated background and Skip button. |
 | [`MediaController.swift`](WalkAway/MediaController.swift) | Pauses system-wide “Now Playing” media when a break starts. |
 | [`welcome.mp3`](WalkAway/welcome.mp3) | The end-of-break chime. |
+
+### Idle and screen-off detection
+Once a second, WalkAway asks macOS how long it has been since the last keyboard, mouse or trackpad input (`CGEventSource.secondsSinceLastEventType`). This covers the whole system and needs no permissions. To tell whether a video is playing, it checks whether any app is keeping the display awake (`PreventUserIdleDisplaySleep`), which video players do and music players don't.
+
+Screen-off is tracked as a set of reasons: screen saver, lock screen, display sleep, system sleep and switching users. The screen only counts as back once every reason has cleared, so a screen saver that turns into a lock screen is measured as one stretch. Durations use the wall clock, so time spent asleep counts.
 
 ### Meeting detection
 Every 2 seconds, while the option is on, WalkAway checks each meeting app in turn:
@@ -124,11 +144,18 @@ private let testingBreakFrequencyMinutes: Int? = 1
 ```
 to get a break every minute. Set it back to `nil` before committing.
 
+To run the unit tests:
+```bash
+xcodebuild test -project WalkAway.xcodeproj -scheme WalkAway -only-testing:WalkAwayTests \
+  CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=
+```
+
 ## Known limitations
 
 - **Media pausing relies on private macOS behavior** and could break in a future macOS update.
 - Only the app macOS considers “Now Playing” is paused, which is usually the one you used most recently.
 - Teams detection is a heuristic and can occasionally misfire.
+- Anything that keeps the display awake counts as watching video, so the away reset won't trigger while it runs. That includes Amphetamine, `caffeinate -d`, Keynote and Zoom calls.
 - Browser-based meetings (Google Meet, Teams on the web) aren't detected.
 
 ## Contributing
