@@ -57,6 +57,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @AppStorage("pauseForMeetingAppsEnabled") var pauseForMeetingAppsEnabled: Bool = false // Added missing binding
     @AppStorage("inactivityThresholdMinutes") var inactivityThresholdMinutes: Int = 10 // New setting
     
+    // TEMP testing override: set to nil to use the user's configured frequency
+    private let testingBreakFrequencyMinutes: Int? = nil
+    private var effectiveBreakFrequencyMinutes: Int { testingBreakFrequencyMinutes ?? breakFrequencyMinutes }
+    
     // Constants
     let preBreakWarningDuration: TimeInterval = 30.0 // Duration of the warning popup
     let targetMeetingAppBundleIDs: Set<String> = [
@@ -319,7 +323,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         isPreBreakWarningActive = false
         remainingPreBreakTime = 0
         
-        let fullBreakInterval = TimeInterval(breakFrequencyMinutes * 60)
+        let fullBreakInterval = TimeInterval(effectiveBreakFrequencyMinutes * 60)
         let initialTimerInterval = max(0, fullBreakInterval - preBreakWarningDuration)
         remainingTimeUntilBreak = fullBreakInterval // Store the full duration for pause/resume
         
@@ -395,6 +399,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         finalCountdownTimer = nil
         isPreBreakWarningActive = false
         isBreakActive = true
+        
+        // Pause any playing media so it doesn't keep running in the background during the break
+        MediaController.shared.pauseIfPlaying()
         
         // Determine break duration and skippable status
         breakCycleCount += 1
@@ -524,7 +531,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 currentRemaining = max(0, preBreakWarningDuration - elapsed)
             } else {
                 // Calculate remaining of the *full* interval until break
-                let fullBreakInterval = TimeInterval(breakFrequencyMinutes * 60)
+                let fullBreakInterval = TimeInterval(effectiveBreakFrequencyMinutes * 60)
                 currentRemaining = max(0, fullBreakInterval - elapsed)
             }
         } 
@@ -549,7 +556,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 finalCountdownTimer = nil
                 print("Timer paused during pre-break warning with \(formatTime(seconds: Int(remainingPreBreakTime))) remaining")
             } else {
-                let fullBreakInterval = TimeInterval(breakFrequencyMinutes * 60)
+                let fullBreakInterval = TimeInterval(effectiveBreakFrequencyMinutes * 60)
                 remainingTimeUntilBreak = max(0, fullBreakInterval - elapsed)
                 timer?.invalidate()
                 timer = nil
@@ -586,7 +593,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             remainingPreBreakTime = 0 // Clear stored value
         } else {
             // Resuming main countdown with exact remaining time
-            let fullBreakInterval = TimeInterval(breakFrequencyMinutes * 60)
+            let fullBreakInterval = TimeInterval(effectiveBreakFrequencyMinutes * 60)
             let intervalUntilWarning = max(0, remainingTimeUntilBreak - preBreakWarningDuration)
             print("Resuming main timer with \(formatTime(seconds: Int(remainingTimeUntilBreak))) remaining until break (warning in \(formatTime(seconds: Int(intervalUntilWarning))))")
             
