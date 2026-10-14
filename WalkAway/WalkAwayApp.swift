@@ -53,7 +53,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @AppStorage("longBreakDurationSeconds") var longBreakDurationSeconds: Int = 300 // Changed to 5 minutes (300 seconds)
     @AppStorage("breakCycleCount") var breakCycleCount: Int = 0
     @AppStorage("launchAtLoginEnabled") var launchAtLoginEnabled: Bool = false // Added for launch setting
-    @AppStorage("pauseForMeetingAppsEnabled") var pauseForMeetingAppsEnabled: Bool = false // Added missing binding
+    @AppStorage("pauseForMeetingAppsEnabled") var pauseForMeetingAppsEnabled: Bool = true
     @AppStorage("inactivityThresholdMinutes") var inactivityThresholdMinutes: Int = 10 // New setting
     
     // TEMP testing override: set to nil to use the user's configured frequency
@@ -258,11 +258,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         
         // Set up popover with SwiftUI content
         popover = NSPopover()
-        // Adjust size slightly to accommodate new control if necessary
-        popover?.contentSize = NSSize(width: 300, height: 510) 
-        popover?.behavior = .applicationDefined
+        popover?.behavior = .transient
         
-        // Create the SwiftUI view for settings, passing new bindings
         let settingsView = SettingsView(
             frequencyMinutes: $breakFrequencyMinutes,
             shortBreakDurationSeconds: $shortBreakDurationSeconds,
@@ -270,9 +267,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             launchAtLoginEnabled: $launchAtLoginEnabled,
             pauseForMeetingAppsEnabled: $pauseForMeetingAppsEnabled,
             inactivityThresholdMinutes: $inactivityThresholdMinutes,
-            isPaused: { [weak self] in self?.isPaused ?? false },
-            isPausedForMeeting: { [weak self] in self?.pausedForMeetingApp ?? false },
-            timeUntilBreak: { [weak self] in self?.timeUntilBreakFormatted ?? "--:--" },
+            status: { [weak self] in self?.timerStatus() ?? .placeholder },
             onSettingsChanged: { [weak self] in
                 self?.restartBreakTimer()
             },
@@ -286,6 +281,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         
         // Wrap the SwiftUI view in a hosting controller
         let hostingController = NSHostingController(rootView: settingsView)
+        hostingController.sizingOptions = [.preferredContentSize]
         popover?.contentViewController = hostingController
         
         // Sync launch at login status on startup
@@ -470,6 +466,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         } else {
             timeUntilBreakFormatted = formatTime(seconds: Int(scheduler.remaining.rounded(.up)))
         }
+    }
+
+    func timerStatus() -> TimerStatus {
+        let state: TimerStatus.State
+        if pausedForMeetingApp {
+            state = .inMeeting
+        } else if isPaused {
+            state = .paused
+        } else if scheduler.phase == .away {
+            state = .away
+        } else {
+            state = .running
+        }
+        let nextIsLong = (breakCycleCount + 1) % 3 == 0
+        return TimerStatus(
+            state: state,
+            remaining: scheduler.remaining,
+            total: scheduler.configuration.workInterval,
+            nextBreakIsLong: nextIsLong,
+            nextBreakSeconds: nextIsLong ? longBreakDurationSeconds : shortBreakDurationSeconds
+        )
     }
 
     // MARK: - Pause / Resume
@@ -729,212 +746,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         } else if !meetingStatus.isActive && isPaused && pausedForMeetingApp {
             print("[Meeting Check] No active meetings detected. Resuming timer.")
             resumeTimer()
-        }
-    }
-}
-
-// MARK: - Settings View
-
-struct SettingsView: View {
-    @Binding var frequencyMinutes: Int
-    @Binding var shortBreakDurationSeconds: Int
-    @Binding var longBreakDurationSeconds: Int
-    @Binding var launchAtLoginEnabled: Bool
-    @Binding var pauseForMeetingAppsEnabled: Bool
-    @Binding var inactivityThresholdMinutes: Int
-    
-    var isPaused: () -> Bool
-    var isPausedForMeeting: () -> Bool
-    var timeUntilBreak: () -> String
-    var onSettingsChanged: () -> Void
-    var onPauseResumeToggled: () -> Void
-    var onLaunchSettingChanged: () -> Void
-
-    // Local state for UI updates
-    @State private var currentTime: String = "--:--"
-    @State private var activeTrigger = false
-    
-    // State for the frequency slider
-    @State private var frequencyValue: Double
-    
-    // Add state for inactivity slider
-    @State private var inactivityValue: Double
-    
-    private let timerUpdatePublisher = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
-    
-    // Initializer to set up the frequency slider state and accept new parameters
-    init(frequencyMinutes: Binding<Int>, 
-         shortBreakDurationSeconds: Binding<Int>,
-         longBreakDurationSeconds: Binding<Int>,
-         launchAtLoginEnabled: Binding<Bool>,
-         pauseForMeetingAppsEnabled: Binding<Bool>,
-         inactivityThresholdMinutes: Binding<Int>,
-         isPaused: @escaping () -> Bool,
-         isPausedForMeeting: @escaping () -> Bool,
-         timeUntilBreak: @escaping () -> String,
-         onSettingsChanged: @escaping () -> Void,
-         onPauseResumeToggled: @escaping () -> Void,
-         onLaunchSettingChanged: @escaping () -> Void) {
-        
-        self._frequencyMinutes = frequencyMinutes
-        self._shortBreakDurationSeconds = shortBreakDurationSeconds
-        self._longBreakDurationSeconds = longBreakDurationSeconds
-        self._launchAtLoginEnabled = launchAtLoginEnabled
-        self._pauseForMeetingAppsEnabled = pauseForMeetingAppsEnabled
-        self._inactivityThresholdMinutes = inactivityThresholdMinutes
-        self.isPaused = isPaused
-        self.isPausedForMeeting = isPausedForMeeting
-        self.timeUntilBreak = timeUntilBreak
-        self.onSettingsChanged = onSettingsChanged
-        self.onPauseResumeToggled = onPauseResumeToggled
-        self.onLaunchSettingChanged = onLaunchSettingChanged
-        
-        // Initialize slider states
-        self._frequencyValue = State(initialValue: Double(frequencyMinutes.wrappedValue))
-        self._inactivityValue = State(initialValue: Double(inactivityThresholdMinutes.wrappedValue))
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) { 
-            Text("WalkAway Settings")
-                .font(.title3) 
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.bottom, 5)
-
-            Divider()
-            
-            // Time Until Next Break Display
-            HStack {
-                Text("Next Break In:")
-                    .font(.headline)
-                Spacer()
-                Text(currentTime)
-                    .font(.system(.title2, design: .monospaced).weight(.medium))
-                    .id("timeDisplay_\(activeTrigger)") // Use trigger for refresh
-            }
-            .padding(.vertical, 5)
-            
-            Divider()
-            
-            // Frequency Setting using Slider
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Break Frequency: \(Int(frequencyValue)) minutes")
-                    .font(.headline)
-                Slider(value: $frequencyValue, in: 30...120, step: 10) {
-                    // Empty label
-                } minimumValueLabel: {
-                    Text("30m").font(.caption)
-                } maximumValueLabel: {
-                    Text("120m").font(.caption)
-                }
-                .onChange(of: frequencyValue) { newValue in
-                    let newIntValue = Int(newValue)
-                    // Update binding only if the integer value actually changed
-                    if newIntValue != frequencyMinutes {
-                        frequencyMinutes = newIntValue
-                        onSettingsChanged() 
-                    }
-                }
-                // Ensure slider state reflects external changes if needed (e.g., from AppStorage defaults)
-                .onAppear {
-                   frequencyValue = Double(frequencyMinutes) 
-                }
-                Text("Break reminder every \(Int(frequencyValue)) minutes")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            }
-            .padding(.bottom, 10)
-
-            // Replace Inactivity Threshold Stepper with Slider
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Reset after inactive for: \(Int(inactivityValue)) minutes")
-                    .font(.headline)
-                Slider(value: $inactivityValue, in: 5...60, step: 5) {
-                    // Empty label
-                } minimumValueLabel: {
-                    Text("5m").font(.caption)
-                } maximumValueLabel: {
-                    Text("60m").font(.caption)
-                }
-                .onChange(of: inactivityValue) { newValue in
-                    let newIntValue = Int(newValue)
-                    // Update binding only if the integer value actually changed
-                    if newIntValue != inactivityThresholdMinutes {
-                        inactivityThresholdMinutes = newIntValue
-                    }
-                }
-                // Ensure slider state reflects external changes
-                .onAppear {
-                    inactivityValue = Double(inactivityThresholdMinutes)
-                }
-                Text("Timer will reset after this period of inactivity")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            }
-            .padding(.bottom, 10)
-
-            // Duration Settings (Grouped Steppers)
-            VStack(alignment: .leading, spacing: 10) {
-                 Text("Break Durations")
-                    .font(.headline)
-                
-                // Short Break Duration
-                Stepper("Short Break: \(shortBreakDurationSeconds) seconds", value: $shortBreakDurationSeconds, in: 30...180, step: 30)
-                    .onChange(of: shortBreakDurationSeconds) { _ in onSettingsChanged() }
-                
-                // Long Break Duration (Displaying and stepping in minutes, storing in seconds)
-                Stepper("Long Break: \(longBreakDurationSeconds / 60) minutes", value: $longBreakDurationSeconds, in: 300...1800, step: 300) // 5-30 minutes in steps of 5
-                    .onChange(of: longBreakDurationSeconds) { _ in onSettingsChanged() }
-                Text("(Every 3rd break)")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            }
-            .padding(.bottom, 10)
-
-            // Launch At Login Setting
-            Toggle("Launch at Login", isOn: $launchAtLoginEnabled)
-                .onChange(of: launchAtLoginEnabled) { _ in 
-                    onLaunchSettingChanged()
-                }
-                .padding(.bottom, 10)
-
-            // Meeting App Pause Setting (Adding missing Toggle)
-            Toggle("Pause for Meeting Apps", isOn: $pauseForMeetingAppsEnabled)
-                // No onChange needed here as AppDelegate reads @AppStorage directly
-                .padding(.bottom, 10)
-
-            Divider()
-
-            // Controls (Pause/Resume, Quit)
-            HStack {
-                Button(isPaused() ? "Resume Timer" : "Pause Timer") {
-                    onPauseResumeToggled()
-                }
-                .controlSize(.regular)
-                .disabled(isPaused() && isPausedForMeeting()) // Added missing disabled modifier
-                
-                Spacer()
-                
-                Button("Quit WalkAway") {
-                    NSApplication.shared.terminate(nil)
-                }
-                .keyboardShortcut("q", modifiers: .command)
-                .controlSize(.regular) 
-            }
-        }
-        .padding(12) 
-        .onReceive(timerUpdatePublisher) { _ in
-            let newTime = timeUntilBreak()
-            if newTime != currentTime {
-                currentTime = newTime
-                activeTrigger.toggle() // Force refresh if needed
-            }
-        }
-        .onAppear {
-            // Set initial time immediately
-            currentTime = timeUntilBreak()
-            // Ensure slider reflects current setting on appear
-            frequencyValue = Double(frequencyMinutes)
         }
     }
 }

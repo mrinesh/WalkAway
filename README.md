@@ -41,16 +41,16 @@ Long, unbroken stretches at a screen lead to eye strain, stiff shoulders, and sl
 
 ## Settings
 
-Click the walking-figure icon in the menu bar to open settings.
+Click the walking-figure icon in the menu bar. The top of the popover shows a countdown ring, what's coming next, and a Pause/Resume button. Settings are below it.
 
-| Setting | Default | Range |
+| Setting | Default | Options |
 | --- | --- | --- |
-| Break frequency | 30 min | 30–120 min |
+| Break every | 30 min | 30–120 min |
 | Short break | 30 sec | 30–180 sec |
 | Long break (every 3rd break) | 5 min | 5–30 min |
-| Reset after inactivity | 10 min | 5–60 min |
-| Pause for meeting apps | Off | On / Off |
-| Launch at Login | Off | On / Off |
+| Pause during meetings | On | On / Off |
+| Reset when away for | 10 min | 5–60 min |
+| Launch at login | Off | On / Off |
 
 ## How a break cycle works
 
